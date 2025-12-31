@@ -138,19 +138,31 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// ============================================
-// RUTAS - TURNOS (Tabla: AbrirTurno)
-// ============================================
 app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
     try {
         const { usuario, sucursal } = req.params;
         const turnos = await appsheetRequest('AbrirTurno', 'Find');
         
-        const turnoActivo = turnos.find(t => 
-            t.Usuario === usuario && 
-            t.Sucursal === sucursal && 
-            t.Estado === 'Abierto'
-        );
+        console.log('Buscando turno para:', usuario, sucursal);
+        console.log('Turnos encontrados:', turnos.length);
+        
+        const turnoActivo = turnos.find(t => {
+            const tUsuario = String(t.Usuario || '').trim().toLowerCase();
+            const tSucursal = String(t.Sucursal || '').trim().toLowerCase();
+            const tEstado = String(t.Estado || '').trim().toLowerCase();
+            
+            const coincide = tUsuario === usuario.trim().toLowerCase() &&
+                            tSucursal === sucursal.trim().toLowerCase() &&
+                            tEstado === 'abierto';
+            
+            if (tEstado === 'abierto') {
+                console.log('Turno abierto encontrado:', t.ID, tUsuario, tSucursal);
+            }
+            
+            return coincide;
+        });
+
+        console.log('Turno activo:', turnoActivo ? turnoActivo.ID : 'ninguno');
 
         res.json({ 
             success: true, 
@@ -511,4 +523,160 @@ app.get('/health', (req, res) => {
 // ============================================
 app.listen(PORT, () => {
     console.log(`🚀 UMO POS API corriendo en puerto ${PORT}`);
+});
+
+
+// ============================================
+// RUTAS - DESCUENTOS (ACTUALIZADO)
+// ============================================
+app.get('/api/descuentos', async (req, res) => {
+    try {
+        const descuentos = await appsheetRequest('Tabla Descuentos', 'Find');
+        
+        const descuentosFormateados = descuentos.map((d, i) => {
+            const id = d.Id || d.ID || `DES-${i+1}`;
+            const nombre = d.Nombre || d.NOMBRE || '';
+            const grupo = d.Grupo || d.GRUPO || '';
+            const metodoPago = d['Metodo de Pago'] || d['Método de Pago'] || d['METODO DE PAGO'] || '';
+            
+            // Parsear porcentaje
+            let porcentaje = 0;
+            const rawPct = d.Porcentaje || d['%'] || d.PCT || 0;
+            if (rawPct) {
+                let s = String(rawPct).replace('%', '').replace(',', '.').trim();
+                porcentaje = parseFloat(s) || 0;
+                // Si es decimal (0.1 = 10%), convertir
+                if (porcentaje > 0 && porcentaje <= 1) {
+                    porcentaje = porcentaje * 100;
+                }
+            }
+            
+            // Crear etiqueta
+            let etiqueta = '';
+            if (grupo && metodoPago) {
+                etiqueta = `${grupo} + ${metodoPago} (${porcentaje}%)`;
+            } else if (grupo) {
+                etiqueta = `Grupo: ${grupo} (${porcentaje}%)`;
+            } else if (metodoPago) {
+                etiqueta = `Método: ${metodoPago} (${porcentaje}%)`;
+            } else {
+                etiqueta = `${nombre || 'Descuento'} (${porcentaje}%)`;
+            }
+
+            return {
+                id: String(id).trim(),
+                nombre: String(nombre).trim(),
+                grupo: String(grupo).trim(),
+                metodoPago: String(metodoPago).trim(),
+                porcentaje: porcentaje,
+                etiqueta: etiqueta
+            };
+        });
+
+        res.json({ success: true, descuentos: descuentosFormateados });
+    } catch (error) {
+        console.error('Error obteniendo descuentos:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================
+// CALCULAR DESCUENTO AUTOMÁTICO
+// ============================================
+app.post('/api/descuentos/calcular', async (req, res) => {
+    try {
+        const { grupoCliente, metodoPago } = req.body;
+        
+        const descuentos = await appsheetRequest('Tabla Descuentos', 'Find');
+        
+        if (!descuentos || descuentos.length === 0) {
+            return res.json({ 
+                success: true, 
+                porcentaje: 0, 
+                descripcion: 'Sin descuento', 
+                id: null 
+            });
+        }
+        
+        const grupoNorm = (grupoCliente || '').toLowerCase().trim();
+        const metodoNorm = (metodoPago || '').toLowerCase().trim();
+        
+        // Parsear descuentos
+        const descuentosParsed = descuentos.map(d => {
+            const grupo = String(d.Grupo || d.GRUPO || '').trim();
+            const metodo = String(d['Metodo de Pago'] || d['Método de Pago'] || d['METODO DE PAGO'] || '').trim();
+            let porcentaje = 0;
+            const rawPct = d.Porcentaje || d['%'] || d.PCT || 0;
+            if (rawPct) {
+                let s = String(rawPct).replace('%', '').replace(',', '.').trim();
+                porcentaje = parseFloat(s) || 0;
+                if (porcentaje > 0 && porcentaje <= 1) {
+                    porcentaje = porcentaje * 100;
+                }
+            }
+            return {
+                id: d.Id || d.ID || '',
+                grupo: grupo,
+                metodoPago: metodo,
+                porcentaje: porcentaje
+            };
+        });
+        
+        // PRIORIDAD 1: Combinación exacta (grupo + método)
+        for (let d of descuentosParsed) {
+            const grupoDesc = d.grupo.toLowerCase();
+            const metodoDesc = d.metodoPago.toLowerCase();
+            
+            if (grupoDesc && metodoDesc && grupoDesc === grupoNorm && metodoDesc === metodoNorm) {
+                return res.json({
+                    success: true,
+                    porcentaje: d.porcentaje,
+                    descripcion: `${d.grupo} + ${d.metodoPago}`,
+                    id: d.id
+                });
+            }
+        }
+        
+        // PRIORIDAD 2: Solo grupo
+        for (let d of descuentosParsed) {
+            const grupoDesc = d.grupo.toLowerCase();
+            const metodoDesc = d.metodoPago;
+            
+            if (grupoDesc && !metodoDesc && grupoDesc === grupoNorm) {
+                return res.json({
+                    success: true,
+                    porcentaje: d.porcentaje,
+                    descripcion: `Grupo: ${d.grupo}`,
+                    id: d.id
+                });
+            }
+        }
+        
+        // PRIORIDAD 3: Solo método de pago
+        for (let d of descuentosParsed) {
+            const grupoDesc = d.grupo;
+            const metodoDesc = d.metodoPago.toLowerCase();
+            
+            if (!grupoDesc && metodoDesc && metodoDesc === metodoNorm) {
+                return res.json({
+                    success: true,
+                    porcentaje: d.porcentaje,
+                    descripcion: `Método: ${d.metodoPago}`,
+                    id: d.id
+                });
+            }
+        }
+        
+        // Sin descuento aplicable
+        res.json({ 
+            success: true, 
+            porcentaje: 0, 
+            descripcion: 'Sin descuento', 
+            id: null 
+        });
+        
+    } catch (error) {
+        console.error('Error calculando descuento:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
 });
