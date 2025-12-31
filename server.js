@@ -690,7 +690,7 @@ app.get('/api/ventas/turno/:turnoId', async (req, res) => {
                 cliente: v.Cliente || 'Público General',
                 vendedor: v.Vendedor || '',
                 total: parseFloat(v.Total || v['Total Venta'] || 0),
-                estado: v.Estado || 'Completada',
+                estado: v['Estado Venta'] || 'Completada',
                 descuento: v.TipoDescuento || ''
             }))
             .sort((a, b) => b.idVenta.localeCompare(a.idVenta));
