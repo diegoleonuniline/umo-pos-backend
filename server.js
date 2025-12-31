@@ -11,6 +11,30 @@ const ACCESS_KEY = 'V2-htkz3-r0477-0iLrM-Jhq7C-2uehz-liV0b-sVTAT-n23hT';
 const API_BASE = 'https://www.appsheet.com/api/v2/apps';
 
 // ============================================
+// SISTEMA DE CACHÉ
+// ============================================
+const CACHE = {
+    productos: { data: null, timestamp: null },
+    clientes: { data: null, timestamp: null },
+    usuarios: { data: null, timestamp: null },
+    metodosPago: { data: null, timestamp: null },
+    descuentos: { data: null, timestamp: null },
+    promociones: { data: null, timestamp: null }
+};
+
+function getCacheStatus() {
+    const status = {};
+    for (const key in CACHE) {
+        status[key] = {
+            loaded: CACHE[key].data !== null,
+            items: CACHE[key].data ? CACHE[key].data.length : 0,
+            timestamp: CACHE[key].timestamp
+        };
+    }
+    return status;
+}
+
+// ============================================
 // CORS - CONFIGURACIÓN
 // ============================================
 const corsOptions = {
@@ -60,9 +84,6 @@ function formatearHoraAppSheet(fecha) {
     return `${horas}:${minutos} ${ampm}`;
 }
 
-// ============================================
-// APPSHEET REQUEST - OPTIMIZADO CON SELECTOR
-// ============================================
 async function appsheetRequest(tabla, action, rows = [], selector = null) {
     const url = `${API_BASE}/${APP_ID}/tables/${encodeURIComponent(tabla)}/Action?applicationAccessKey=${ACCESS_KEY}`;
     
@@ -100,7 +121,153 @@ async function appsheetRequest(tabla, action, rows = [], selector = null) {
 }
 
 // ============================================
-// RUTAS - AUTENTICACIÓN
+// FUNCIONES DE CARGA DE CACHÉ
+// ============================================
+async function cargarProductos() {
+    const productos = await appsheetRequest('Productos', 'Find');
+    CACHE.productos.data = (Array.isArray(productos) ? productos : [])
+        .filter(p => {
+            const sePuedeVender = p['SE PUEDE VENDER'];
+            if (sePuedeVender === undefined || sePuedeVender === '') return true;
+            return sePuedeVender === true || sePuedeVender === 'true' || sePuedeVender === 'TRUE';
+        })
+        .map(p => ({
+            codigoBarras: p['Codigo De Barras'] || p['CODIGO DE BARRAS'] || '',
+            sku: p['SKU'] || p['Codigo De Barras'] || '',
+            nombre: p['Nombre'] || p['NOMBRE'] || 'Sin nombre',
+            precio: parseFloat(p['Precio'] || p['PRECIO']) || 0,
+            categoria: p['Categorias'] || p['CATEGORIAS'] || 'Sin categoría',
+            stock: parseFloat(p['Stock'] || p['STOCK']) || 0,
+            imagen: p['IMAGEN'] || null
+        }));
+    CACHE.productos.timestamp = new Date().toISOString();
+    return CACHE.productos.data;
+}
+
+async function cargarClientes() {
+    const clientes = await appsheetRequest('Clientes', 'Find');
+    CACHE.clientes.data = (Array.isArray(clientes) ? clientes : []).map(c => ({
+        codigo: c['Codigo'] || c['CODIGO'] || c['Id'] || '',
+        nombre: c['Nombre'] || c['NOMBRE'] || 'Sin nombre',
+        correo: c['Correo'] || c['CORREO'] || '',
+        telefono: c['Telefono'] || c['TELEFONO'] || '',
+        grupo: c['Grupo'] || c['GRUPO'] || ''
+    }));
+    CACHE.clientes.timestamp = new Date().toISOString();
+    return CACHE.clientes.data;
+}
+
+async function cargarUsuarios() {
+    const usuarios = await appsheetRequest('Usuarios', 'Find');
+    CACHE.usuarios.data = Array.isArray(usuarios) ? usuarios : [];
+    CACHE.usuarios.timestamp = new Date().toISOString();
+    return CACHE.usuarios.data;
+}
+
+async function cargarMetodosPago() {
+    const metodos = await appsheetRequest('Metodos de pago', 'Find');
+    CACHE.metodosPago.data = (Array.isArray(metodos) ? metodos : [])
+        .map(m => m['Metodo de pago'] || m['Método de pago'] || m['METODO DE PAGO'] || 'Sin nombre');
+    if (CACHE.metodosPago.data.length === 0) {
+        CACHE.metodosPago.data = ['Efectivo', 'Tarjeta', 'Transferencia'];
+    }
+    CACHE.metodosPago.timestamp = new Date().toISOString();
+    return CACHE.metodosPago.data;
+}
+
+async function cargarDescuentos() {
+    const descuentos = await appsheetRequest('Tabla Descuentos', 'Find');
+    CACHE.descuentos.data = (Array.isArray(descuentos) ? descuentos : []).map((d, i) => {
+        const id = d.Id || d.ID || `DES-${i+1}`;
+        const nombre = d.Nombre || d.NOMBRE || '';
+        const grupo = d.Grupo || d.GRUPO || '';
+        const metodoPago = d['Metodo de Pago'] || d['Método de Pago'] || d['METODO DE PAGO'] || '';
+        
+        let porcentaje = 0;
+        const rawPct = d.Porcentaje || d['%'] || d.PCT || 0;
+        if (rawPct) {
+            let s = String(rawPct).replace('%', '').replace(',', '.').trim();
+            porcentaje = parseFloat(s) || 0;
+            if (porcentaje > 0 && porcentaje <= 1) porcentaje = porcentaje * 100;
+        }
+        
+        let etiqueta = '';
+        if (grupo && metodoPago) etiqueta = `${grupo} + ${metodoPago} (${porcentaje}%)`;
+        else if (grupo) etiqueta = `Grupo: ${grupo} (${porcentaje}%)`;
+        else if (metodoPago) etiqueta = `Método: ${metodoPago} (${porcentaje}%)`;
+        else etiqueta = `${nombre || 'Descuento'} (${porcentaje}%)`;
+
+        return { id: String(id).trim(), nombre: String(nombre).trim(), grupo: String(grupo).trim(), metodoPago: String(metodoPago).trim(), porcentaje, etiqueta };
+    });
+    CACHE.descuentos.timestamp = new Date().toISOString();
+    return CACHE.descuentos.data;
+}
+
+async function cargarPromociones() {
+    const promociones = await appsheetRequest('Promociones', 'Find', [], `Filter(Promociones, [Estado] = "Activa")`);
+    CACHE.promociones.data = (Array.isArray(promociones) ? promociones : []).map(p => ({
+        id: p.Id,
+        basadaEn: p['Basada en'],
+        forma: p.Forma,
+        categoria: p.Categoria || '',
+        productos: p.Productos ? String(p.Productos).split(',').map(s => s.trim()) : [],
+        diasPromocion: p['Dias de Promocion'] || '',
+        fechaInicio: p['Fecha Inicio'],
+        fechaFin: p['Fecha Fin'],
+        porcentaje: (parseFloat(p['PorCentaje de Descuento']) || 0) * 100,
+        precio: parseFloat(p.Precio) || 0,
+        cantidadPagada: parseInt(p['Cantidad Pagada']) || 0,
+        cantidadLlevar: parseInt(p['Cantidad a Llevar']) || 0,
+        etiqueta: p.Etiqueta || ''
+    }));
+    CACHE.promociones.timestamp = new Date().toISOString();
+    return CACHE.promociones.data;
+}
+
+// ============================================
+// SINCRONIZACIÓN COMPLETA
+// ============================================
+async function sincronizarTodo() {
+    console.log('🔄 Iniciando sincronización completa...');
+    const inicio = Date.now();
+    
+    try {
+        await Promise.all([
+            cargarProductos(),
+            cargarClientes(),
+            cargarUsuarios(),
+            cargarMetodosPago(),
+            cargarDescuentos(),
+            cargarPromociones()
+        ]);
+        
+        const tiempo = Date.now() - inicio;
+        console.log(`✅ Sincronización completa en ${tiempo}ms`);
+        return { success: true, tiempo, cache: getCacheStatus() };
+    } catch (error) {
+        console.error('❌ Error en sincronización:', error);
+        throw error;
+    }
+}
+
+// ============================================
+// ENDPOINT DE SINCRONIZACIÓN
+// ============================================
+app.post('/api/sync', async (req, res) => {
+    try {
+        const resultado = await sincronizarTodo();
+        res.json(resultado);
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/sync/status', (req, res) => {
+    res.json({ success: true, cache: getCacheStatus() });
+});
+
+// ============================================
+// RUTAS - AUTENTICACIÓN (USA CACHÉ)
 // ============================================
 app.post('/api/login', async (req, res) => {
     try {
@@ -110,9 +277,12 @@ app.post('/api/login', async (req, res) => {
             return res.status(400).json({ success: false, error: 'ID de empleado y PIN son requeridos' });
         }
 
-        const usuarios = await appsheetRequest('Usuarios', 'Find');
+        // Usar caché si existe, sino cargar
+        if (!CACHE.usuarios.data) {
+            await cargarUsuarios();
+        }
         
-        const usuario = usuarios.find(u => 
+        const usuario = CACHE.usuarios.data.find(u => 
             String(u['ID Empleado']).trim() === String(empleadoId).trim() && 
             String(u['Pin de Acceso a Sistema']).trim() === String(pin).trim()
         );
@@ -144,16 +314,21 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
     try {
         const { usuario, sucursal } = req.params;
         
-        // Consultas en paralelo
-        const [usuarios, turnos] = await Promise.all([
-            appsheetRequest('Usuarios', 'Find', [], `Filter(Usuarios, [ID Empleado] = "${usuario}")`),
-            appsheetRequest('AbrirTurno', 'Find', [], `Filter(AbrirTurno, AND([Estado] = "Abierto", [Sucursal] = "${sucursal}"))`)
-        ]);
+        // Usuarios desde caché
+        if (!CACHE.usuarios.data) {
+            await cargarUsuarios();
+        }
         
         let nombreUsuario = null;
-        if (Array.isArray(usuarios) && usuarios.length > 0) {
-            nombreUsuario = usuarios[0]['Nombre'];
+        const usuarioEncontrado = CACHE.usuarios.data.find(u => 
+            String(u['ID Empleado']).trim() === String(usuario).trim()
+        );
+        if (usuarioEncontrado) {
+            nombreUsuario = usuarioEncontrado['Nombre'];
         }
+        
+        // Turnos siempre en tiempo real (cambian constantemente)
+        const turnos = await appsheetRequest('AbrirTurno', 'Find', [], `Filter(AbrirTurno, AND([Estado] = "Abierto", [Sucursal] = "${sucursal}"))`);
         
         if (!Array.isArray(turnos) || turnos.length === 0) {
             return res.json({ success: true, turnoActivo: null });
@@ -254,29 +429,14 @@ app.post('/api/turnos/cerrar', async (req, res) => {
 });
 
 // ============================================
-// RUTAS - PRODUCTOS
+// RUTAS - PRODUCTOS (DESDE CACHÉ)
 // ============================================
 app.get('/api/productos', async (req, res) => {
     try {
-        const productos = await appsheetRequest('Productos', 'Find');
-        
-        const productosFormateados = (Array.isArray(productos) ? productos : [])
-            .filter(p => {
-                const sePuedeVender = p['SE PUEDE VENDER'];
-                if (sePuedeVender === undefined || sePuedeVender === '') return true;
-                return sePuedeVender === true || sePuedeVender === 'true' || sePuedeVender === 'TRUE';
-            })
-            .map(p => ({
-                codigoBarras: p['Codigo De Barras'] || p['CODIGO DE BARRAS'] || '',
-                sku: p['SKU'] || p['Codigo De Barras'] || '',
-                nombre: p['Nombre'] || p['NOMBRE'] || 'Sin nombre',
-                precio: parseFloat(p['Precio'] || p['PRECIO']) || 0,
-                categoria: p['Categorias'] || p['CATEGORIAS'] || 'Sin categoría',
-                stock: parseFloat(p['Stock'] || p['STOCK']) || 0,
-                imagen: p['IMAGEN'] || null
-            }));
-
-        res.json({ success: true, productos: productosFormateados });
+        if (!CACHE.productos.data) {
+            await cargarProductos();
+        }
+        res.json({ success: true, productos: CACHE.productos.data, fromCache: true, timestamp: CACHE.productos.timestamp });
     } catch (error) {
         console.error('Error obteniendo productos:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -284,21 +444,14 @@ app.get('/api/productos', async (req, res) => {
 });
 
 // ============================================
-// RUTAS - CLIENTES
+// RUTAS - CLIENTES (DESDE CACHÉ)
 // ============================================
 app.get('/api/clientes', async (req, res) => {
     try {
-        const clientes = await appsheetRequest('Clientes', 'Find');
-        
-        const clientesFormateados = (Array.isArray(clientes) ? clientes : []).map(c => ({
-            codigo: c['Codigo'] || c['CODIGO'] || c['Id'] || '',
-            nombre: c['Nombre'] || c['NOMBRE'] || 'Sin nombre',
-            correo: c['Correo'] || c['CORREO'] || '',
-            telefono: c['Telefono'] || c['TELEFONO'] || '',
-            grupo: c['Grupo'] || c['GRUPO'] || ''
-        }));
-
-        res.json({ success: true, clientes: clientesFormateados });
+        if (!CACHE.clientes.data) {
+            await cargarClientes();
+        }
+        res.json({ success: true, clientes: CACHE.clientes.data, fromCache: true, timestamp: CACHE.clientes.timestamp });
     } catch (error) {
         console.error('Error obteniendo clientes:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -321,6 +474,18 @@ app.post('/api/clientes', async (req, res) => {
         };
 
         await appsheetRequest('Clientes', 'Add', [clienteData]);
+        
+        // Agregar al caché local
+        if (CACHE.clientes.data) {
+            CACHE.clientes.data.push({
+                codigo: clienteData.Codigo,
+                nombre: clienteData.Nombre,
+                correo: clienteData.Correo,
+                telefono: clienteData.Telefono,
+                grupo: ''
+            });
+        }
+        
         res.json({ success: true, codigo: clienteData.Codigo });
     } catch (error) {
         console.error('Error agregando cliente:', error);
@@ -329,49 +494,28 @@ app.post('/api/clientes', async (req, res) => {
 });
 
 // ============================================
-// RUTAS - MÉTODOS DE PAGO
+// RUTAS - MÉTODOS DE PAGO (DESDE CACHÉ)
 // ============================================
 app.get('/api/metodos-pago', async (req, res) => {
     try {
-        const metodos = await appsheetRequest('Metodos de pago', 'Find');
-        const lista = (Array.isArray(metodos) ? metodos : []).map(m => m['Metodo de pago'] || m['Método de pago'] || m['METODO DE PAGO'] || 'Sin nombre');
-        res.json({ success: true, metodos: lista.length > 0 ? lista : ['Efectivo', 'Tarjeta', 'Transferencia'] });
+        if (!CACHE.metodosPago.data) {
+            await cargarMetodosPago();
+        }
+        res.json({ success: true, metodos: CACHE.metodosPago.data, fromCache: true });
     } catch (error) {
         res.json({ success: true, metodos: ['Efectivo', 'Tarjeta', 'Transferencia'] });
     }
 });
 
 // ============================================
-// RUTAS - DESCUENTOS
+// RUTAS - DESCUENTOS (DESDE CACHÉ)
 // ============================================
 app.get('/api/descuentos', async (req, res) => {
     try {
-        const descuentos = await appsheetRequest('Tabla Descuentos', 'Find');
-        
-        const descuentosFormateados = (Array.isArray(descuentos) ? descuentos : []).map((d, i) => {
-            const id = d.Id || d.ID || `DES-${i+1}`;
-            const nombre = d.Nombre || d.NOMBRE || '';
-            const grupo = d.Grupo || d.GRUPO || '';
-            const metodoPago = d['Metodo de Pago'] || d['Método de Pago'] || d['METODO DE PAGO'] || '';
-            
-            let porcentaje = 0;
-            const rawPct = d.Porcentaje || d['%'] || d.PCT || 0;
-            if (rawPct) {
-                let s = String(rawPct).replace('%', '').replace(',', '.').trim();
-                porcentaje = parseFloat(s) || 0;
-                if (porcentaje > 0 && porcentaje <= 1) porcentaje = porcentaje * 100;
-            }
-            
-            let etiqueta = '';
-            if (grupo && metodoPago) etiqueta = `${grupo} + ${metodoPago} (${porcentaje}%)`;
-            else if (grupo) etiqueta = `Grupo: ${grupo} (${porcentaje}%)`;
-            else if (metodoPago) etiqueta = `Método: ${metodoPago} (${porcentaje}%)`;
-            else etiqueta = `${nombre || 'Descuento'} (${porcentaje}%)`;
-
-            return { id: String(id).trim(), nombre: String(nombre).trim(), grupo: String(grupo).trim(), metodoPago: String(metodoPago).trim(), porcentaje, etiqueta };
-        });
-
-        res.json({ success: true, descuentos: descuentosFormateados });
+        if (!CACHE.descuentos.data) {
+            await cargarDescuentos();
+        }
+        res.json({ success: true, descuentos: CACHE.descuentos.data, fromCache: true });
     } catch (error) {
         console.error('Error obteniendo descuentos:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -381,44 +525,34 @@ app.get('/api/descuentos', async (req, res) => {
 app.post('/api/descuentos/calcular', async (req, res) => {
     try {
         const { grupoCliente, metodoPago } = req.body;
-        const descuentos = await appsheetRequest('Tabla Descuentos', 'Find');
         
-        if (!Array.isArray(descuentos) || descuentos.length === 0) {
+        if (!CACHE.descuentos.data) {
+            await cargarDescuentos();
+        }
+        
+        if (!CACHE.descuentos.data || CACHE.descuentos.data.length === 0) {
             return res.json({ success: true, porcentaje: 0, descripcion: 'Sin descuento', id: null });
         }
         
         const grupoNorm = (grupoCliente || '').toLowerCase().trim();
         const metodoNorm = (metodoPago || '').toLowerCase().trim();
         
-        const descuentosParsed = descuentos.map(d => {
-            const grupo = String(d.Grupo || d.GRUPO || '').trim();
-            const metodo = String(d['Metodo de Pago'] || d['Método de Pago'] || d['METODO DE PAGO'] || '').trim();
-            let porcentaje = 0;
-            const rawPct = d.Porcentaje || d['%'] || d.PCT || 0;
-            if (rawPct) {
-                let s = String(rawPct).replace('%', '').replace(',', '.').trim();
-                porcentaje = parseFloat(s) || 0;
-                if (porcentaje > 0 && porcentaje <= 1) porcentaje = porcentaje * 100;
-            }
-            return { id: d.Id || d.ID || '', grupo, metodoPago: metodo, porcentaje };
-        });
-        
         // Prioridad 1: Grupo + Método
-        for (let d of descuentosParsed) {
+        for (let d of CACHE.descuentos.data) {
             if (d.grupo.toLowerCase() === grupoNorm && d.metodoPago.toLowerCase() === metodoNorm && d.grupo && d.metodoPago) {
                 return res.json({ success: true, porcentaje: d.porcentaje, descripcion: `${d.grupo} + ${d.metodoPago}`, id: d.id });
             }
         }
         
         // Prioridad 2: Solo grupo
-        for (let d of descuentosParsed) {
+        for (let d of CACHE.descuentos.data) {
             if (d.grupo.toLowerCase() === grupoNorm && !d.metodoPago && d.grupo) {
                 return res.json({ success: true, porcentaje: d.porcentaje, descripcion: `Grupo: ${d.grupo}`, id: d.id });
             }
         }
         
         // Prioridad 3: Solo método
-        for (let d of descuentosParsed) {
+        for (let d of CACHE.descuentos.data) {
             if (d.metodoPago.toLowerCase() === metodoNorm && !d.grupo && d.metodoPago) {
                 return res.json({ success: true, porcentaje: d.porcentaje, descripcion: `Método: ${d.metodoPago}`, id: d.id });
             }
@@ -432,29 +566,14 @@ app.post('/api/descuentos/calcular', async (req, res) => {
 });
 
 // ============================================
-// RUTAS - PROMOCIONES
+// RUTAS - PROMOCIONES (DESDE CACHÉ)
 // ============================================
 app.get('/api/promociones', async (req, res) => {
     try {
-        const promociones = await appsheetRequest('Promociones', 'Find', [], `Filter(Promociones, [Estado] = "Activa")`);
-        
-        const promoActivas = (Array.isArray(promociones) ? promociones : []).map(p => ({
-            id: p.Id,
-            basadaEn: p['Basada en'],
-            forma: p.Forma,
-            categoria: p.Categoria || '',
-            productos: p.Productos ? String(p.Productos).split(',').map(s => s.trim()) : [],
-            diasPromocion: p['Dias de Promocion'] || '',
-            fechaInicio: p['Fecha Inicio'],
-            fechaFin: p['Fecha Fin'],
-            porcentaje: (parseFloat(p['PorCentaje de Descuento']) || 0) * 100,
-            precio: parseFloat(p.Precio) || 0,
-            cantidadPagada: parseInt(p['Cantidad Pagada']) || 0,
-            cantidadLlevar: parseInt(p['Cantidad a Llevar']) || 0,
-            etiqueta: p.Etiqueta || ''
-        }));
-
-        res.json({ success: true, promociones: promoActivas });
+        if (!CACHE.promociones.data) {
+            await cargarPromociones();
+        }
+        res.json({ success: true, promociones: CACHE.promociones.data, fromCache: true });
     } catch (error) {
         console.error('Error obteniendo promociones:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -481,7 +600,6 @@ app.post('/api/ventas', async (req, res) => {
             'Estado Venta': 'Cerrada'
         };
 
-        // Preparar datos
         const detallesData = (detalles || []).map(d => ({
             ID: d.ID,
             Ventas: venta.IdVenta,
@@ -508,7 +626,6 @@ app.post('/api/ventas', async (req, res) => {
             Estado: 'Activo'
         }));
 
-        // Ejecutar en paralelo
         await Promise.all([
             appsheetRequest('Ventas', 'Add', [ventaData]),
             detallesData.length > 0 ? appsheetRequest('Detalle Venta', 'Add', detallesData) : Promise.resolve(),
@@ -523,13 +640,11 @@ app.post('/api/ventas', async (req, res) => {
 });
 
 // ============================================
-// VENTAS DEL TURNO - OPTIMIZADO
+// VENTAS DEL TURNO
 // ============================================
 app.get('/api/ventas/turno/:turnoId', async (req, res) => {
     try {
         const { turnoId } = req.params;
-        
-        // Filtrar desde AppSheet
         const ventas = await appsheetRequest('Ventas', 'Find', [], `Filter(Ventas, [TurnoId] = "${turnoId}")`);
         
         const ventasTurno = (Array.isArray(ventas) ? ventas : [])
@@ -553,13 +668,12 @@ app.get('/api/ventas/turno/:turnoId', async (req, res) => {
 });
 
 // ============================================
-// DETALLE VENTA - OPTIMIZADO CON PARALELO
+// DETALLE VENTA
 // ============================================
 app.get('/api/ventas/:idVenta/detalle', async (req, res) => {
     try {
         const { idVenta } = req.params;
         
-        // Consultas en paralelo
         const [ventas, detalles, pagosTabla] = await Promise.all([
             appsheetRequest('Ventas', 'Find', [], `Filter(Ventas, [IdVenta] = "${idVenta}")`),
             appsheetRequest('Detalle Venta', 'Find', [], `Filter(Detalle Venta, [Ventas] = "${idVenta}")`),
@@ -615,14 +729,13 @@ app.get('/api/ventas/:idVenta/detalle', async (req, res) => {
 });
 
 // ============================================
-// CANCELAR VENTA - OPTIMIZADO
+// CANCELAR VENTA
 // ============================================
 app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
     try {
         const { idVenta } = req.params;
         const { motivo, usuario } = req.body;
         
-        // Obtener items y pagos en paralelo
         const [detalles, pagosTabla] = await Promise.all([
             appsheetRequest('Detalle Venta', 'Find', [], `Filter(Detalle Venta, [Ventas] = "${idVenta}")`),
             appsheetRequest('Pagos', 'Find', [], `Filter(Pagos, [Ventas] = "${idVenta}")`)
@@ -631,7 +744,6 @@ app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
         const itemsVenta = Array.isArray(detalles) ? detalles : [];
         const pagosVenta = Array.isArray(pagosTabla) ? pagosTabla : [];
         
-        // Preparar actualizaciones
         const motivoCompleto = `${motivo || 'Sin motivo'} - Por: ${usuario || 'Sistema'} - ${formatearFechaAppSheet()} ${formatearHoraAppSheet()}`;
         
         const promesas = [
@@ -642,7 +754,6 @@ app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
             }])
         ];
         
-        // Cancelar items
         for (const item of itemsVenta) {
             promesas.push(appsheetRequest('Detalle Venta', 'Edit', [{
                 ID: item.ID,
@@ -651,7 +762,6 @@ app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
             }]));
         }
         
-        // Cancelar pagos
         for (const pago of pagosVenta) {
             promesas.push(appsheetRequest('Pagos', 'Edit', [{
                 Id: pago.Id || pago.ID,
@@ -659,7 +769,6 @@ app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
             }]));
         }
         
-        // Ejecutar todo en paralelo
         await Promise.all(promesas);
 
         res.json({ 
@@ -675,14 +784,13 @@ app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
 });
 
 // ============================================
-// CANCELAR ITEM - OPTIMIZADO
+// CANCELAR ITEM
 // ============================================
 app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
     try {
         const { idVenta } = req.params;
         const { itemId, motivo, usuario } = req.body;
         
-        // Obtener items de la venta
         const detalles = await appsheetRequest('Detalle Venta', 'Find', [], `Filter(Detalle Venta, [Ventas] = "${idVenta}")`);
         
         const items = Array.isArray(detalles) ? detalles : [];
@@ -692,14 +800,12 @@ app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
             return res.status(404).json({ success: false, error: 'Item no encontrado' });
         }
         
-        // Calcular nuevo total
         const itemsActivos = items.filter(d => 
             String(d.ID).trim() !== String(itemId).trim() &&
             (d.Status || 'Activo') !== 'Cancelado'
         );
         const nuevoTotal = itemsActivos.reduce((sum, d) => sum + (parseFloat(d.Total) || 0), 0);
         
-        // Actualizar en paralelo
         await Promise.all([
             appsheetRequest('Detalle Venta', 'Edit', [{
                 ID: itemId,
@@ -728,7 +834,13 @@ app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
 // HEALTH CHECK
 // ============================================
 app.get('/', (req, res) => {
-    res.json({ status: 'OK', servicio: 'UMO POS API', version: '1.1.0', cors: 'enabled' });
+    res.json({ 
+        status: 'OK', 
+        servicio: 'UMO POS API', 
+        version: '1.2.0', 
+        cors: 'enabled',
+        cache: getCacheStatus()
+    });
 });
 
 app.get('/health', (req, res) => {
@@ -736,8 +848,16 @@ app.get('/health', (req, res) => {
 });
 
 // ============================================
-// INICIAR SERVIDOR
+// INICIAR SERVIDOR + CARGAR CACHÉ INICIAL
 // ============================================
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log(`🚀 UMO POS API corriendo en puerto ${PORT}`);
+    
+    // Cargar caché al iniciar
+    try {
+        await sincronizarTodo();
+        console.log('✅ Caché inicial cargado');
+    } catch (error) {
+        console.error('⚠️ Error cargando caché inicial:', error.message);
+    }
 });
