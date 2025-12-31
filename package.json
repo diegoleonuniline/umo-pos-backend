@@ -16,31 +16,3 @@
     "node": "18.x"
   }
 }
-```
-
-4. Click **"Commit new file"**
-
----
-
-### Archivo 2: `Procfile`
-
-1. Click **"Add file"** → **"Create new file"**
-2. Nombre: `Procfile` (sin extensión, P mayúscula)
-3. Contenido:
-```
-web: node server.js
-```
-
-4. Click **"Commit new file"**
-
----
-
-### Archivo 3: `.gitignore`
-
-1. Click **"Add file"** → **"Create new file"**
-2. Nombre: `.gitignore`
-3. Contenido:
-```
-node_modules/
-.env
-.DS_Store
