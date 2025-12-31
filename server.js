@@ -776,8 +776,8 @@ app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
         // Actualizar estado de la venta
         await appsheetRequest('Ventas', 'Edit', [{
             IdVenta: idVenta,
-            Estado: 'Cancelada',
-            Observaciones: `CANCELADA: ${motivo || 'Sin motivo'} - Por: ${usuario || 'Sistema'} - ${formatearFechaAppSheet()} ${formatearHoraAppSheet()}`
+            'Estado Venta': 'Cancelada',
+            'Motivo Cancelacion': `${motivo || 'Sin motivo'} - Por: ${usuario || 'Sistema'} - ${formatearFechaAppSheet()} ${formatearHoraAppSheet()}`
         }]);
         
         // Cancelar todos los items
@@ -789,7 +789,8 @@ app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
         for (const item of itemsVenta) {
             await appsheetRequest('Detalle Venta', 'Edit', [{
                 ID: item.ID,
-                Estado: 'Cancelado'
+                Status: 'Cancelado',
+                'Motivo Cancelacion': motivo || 'Venta cancelada'
             }]);
         }
         
@@ -824,7 +825,6 @@ app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
         const { idVenta } = req.params;
         const { itemId, motivo, usuario } = req.body;
         
-        // Obtener el item
         const detalles = await appsheetRequest('Detalle Venta', 'Find');
         const item = detalles.find(d => 
             String(d.ID).trim() === String(itemId).trim() &&
@@ -838,15 +838,15 @@ app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
         // Marcar item como cancelado
         await appsheetRequest('Detalle Venta', 'Edit', [{
             ID: itemId,
-            Estado: 'Cancelado',
-            Observaciones: `CANCELADO: ${motivo || 'Sin motivo'} - Por: ${usuario || 'Sistema'}`
+            Status: 'Cancelado',
+            'Motivo Cancelacion': `${motivo || 'Sin motivo'} - Por: ${usuario || 'Sistema'}`
         }]);
         
         // Recalcular total de la venta
         const itemsActivos = detalles.filter(d => 
             String(d.Ventas || '').trim() === String(idVenta).trim() &&
             String(d.ID).trim() !== String(itemId).trim() &&
-            (d.Estado || 'Activo') !== 'Cancelado'
+            (d.Status || 'Activo') !== 'Cancelado'
         );
         
         const nuevoTotal = itemsActivos.reduce((sum, d) => sum + (parseFloat(d.Total) || 0), 0);
@@ -854,8 +854,7 @@ app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
         // Actualizar venta con nuevo total
         await appsheetRequest('Ventas', 'Edit', [{
             IdVenta: idVenta,
-            'Total Venta': nuevoTotal,
-            Observaciones: `Item cancelado: ${item.Producto} - ${motivo || ''}`
+            'Total Venta': nuevoTotal
         }]);
 
         res.json({ 
@@ -869,7 +868,6 @@ app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
-
 
 
 
