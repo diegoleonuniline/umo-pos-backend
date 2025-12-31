@@ -148,7 +148,7 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
         const turnos = await appsheetRequest('AbrirTurno', 'Find');
         
         console.log('=== BUSCANDO TURNO ===');
-        console.log('Usuario recibido:', usuario);
+        console.log('Usuario/ID recibido:', usuario);
         console.log('Sucursal recibida:', sucursal);
         console.log('Total turnos en tabla:', Array.isArray(turnos) ? turnos.length : 0);
         
@@ -157,20 +157,20 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
             return res.json({ success: true, turnoActivo: null });
         }
         
+        // Normalizar valores de búsqueda
+        const usuarioBuscar = String(usuario).trim().toLowerCase();
+        const sucursalBuscar = String(sucursal).trim().toLowerCase();
+        
         // Listar todos los turnos abiertos para debug
         const turnosAbiertos = turnos.filter(t => 
             String(t.Estado || '').trim().toLowerCase() === 'abierto'
         );
-        console.log('Turnos abiertos encontrados:', turnosAbiertos.length);
+        console.log('Turnos abiertos:', turnosAbiertos.length);
         turnosAbiertos.forEach(t => {
             console.log(`  - ID: ${t.ID}, Usuario: "${t.Usuario}", Sucursal: "${t.Sucursal}"`);
         });
         
-        // Normalizar valores de búsqueda
-        const usuarioBuscar = usuario.trim().toLowerCase();
-        const sucursalBuscar = sucursal.trim().toLowerCase();
-        
-        // Buscar turno activo - múltiples criterios
+        // Buscar turno activo
         const turnoActivo = turnos.find(t => {
             const tEstado = String(t.Estado || '').trim().toLowerCase();
             if (tEstado !== 'abierto') return false;
@@ -178,27 +178,16 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
             const tSucursal = String(t.Sucursal || '').trim().toLowerCase();
             if (tSucursal !== sucursalBuscar) return false;
             
-            // Intentar coincidir por múltiples campos de usuario
+            // El campo Usuario en AbrirTurno contiene el ID del empleado
             const tUsuario = String(t.Usuario || '').trim().toLowerCase();
-            const tEmpleadoId = String(t['ID Empleado'] || t.EmpleadoId || t.empleadoId || '').trim().toLowerCase();
-            const tVendedor = String(t.Vendedor || '').trim().toLowerCase();
             
-            // Coincidencia exacta
-            if (tUsuario === usuarioBuscar) return true;
-            if (tEmpleadoId === usuarioBuscar) return true;
-            if (tVendedor === usuarioBuscar) return true;
-            
-            // Coincidencia parcial (el nombre está contenido)
-            if (tUsuario && tUsuario.includes(usuarioBuscar)) return true;
-            if (tUsuario && usuarioBuscar.includes(tUsuario)) return true;
-            
-            return false;
+            return tUsuario === usuarioBuscar;
         });
 
         if (turnoActivo) {
             console.log('✅ Turno activo encontrado:', turnoActivo.ID);
         } else {
-            console.log('❌ No se encontró turno activo para este usuario/sucursal');
+            console.log('❌ No se encontró turno activo');
         }
 
         res.json({ 
@@ -207,49 +196,6 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
         });
     } catch (error) {
         console.error('Error verificando turno:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// Ruta alternativa: buscar por ID de empleado
-app.get('/api/turnos/activo-por-id/:empleadoId/:sucursal', async (req, res) => {
-    try {
-        const { empleadoId, sucursal } = req.params;
-        const turnos = await appsheetRequest('AbrirTurno', 'Find');
-        
-        console.log('=== BUSCANDO TURNO POR ID ===');
-        console.log('EmpleadoId:', empleadoId);
-        console.log('Sucursal:', sucursal);
-        
-        if (!Array.isArray(turnos) || turnos.length === 0) {
-            return res.json({ success: true, turnoActivo: null });
-        }
-        
-        const sucursalBuscar = sucursal.trim().toLowerCase();
-        const idBuscar = String(empleadoId).trim();
-        
-        const turnoActivo = turnos.find(t => {
-            const tEstado = String(t.Estado || '').trim().toLowerCase();
-            if (tEstado !== 'abierto') return false;
-            
-            const tSucursal = String(t.Sucursal || '').trim().toLowerCase();
-            if (tSucursal !== sucursalBuscar) return false;
-            
-            // Buscar por cualquier campo que pueda contener el ID
-            const tEmpleadoId = String(t['ID Empleado'] || t.EmpleadoId || '').trim();
-            const tUsuario = String(t.Usuario || '').trim();
-            
-            return tEmpleadoId === idBuscar || tUsuario === idBuscar;
-        });
-
-        console.log('Turno encontrado:', turnoActivo ? turnoActivo.ID : 'ninguno');
-
-        res.json({ 
-            success: true, 
-            turnoActivo: turnoActivo || null 
-        });
-    } catch (error) {
-        console.error('Error verificando turno por ID:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
