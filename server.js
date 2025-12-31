@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
-const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,9 +15,7 @@ const API_BASE = 'https://www.appsheet.com/api/v2/apps';
 // ============================================
 const corsOptions = {
     origin: function (origin, callback) {
-        // Permitir requests sin origin (como mobile apps o curl)
         if (!origin) return callback(null, true);
-        
         const allowedOrigins = [
             'https://diegoleonuniline.github.io',
             'http://localhost:3000',
@@ -26,11 +23,10 @@ const corsOptions = {
             'http://127.0.0.1:5500',
             'http://localhost:8080'
         ];
-        
         if (allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.github.io')) {
             callback(null, true);
         } else {
-            callback(null, true); // Permitir todos por ahora para debug
+            callback(null, true);
         }
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -40,15 +36,30 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
-// Manejar preflight requests explícitamente
 app.options('*', cors(corsOptions));
-
 app.use(express.json());
 
 // ============================================
 // UTILIDADES
 // ============================================
+function formatearFechaAppSheet(fecha) {
+    const d = fecha || new Date();
+    const mes = String(d.getMonth() + 1).padStart(2, '0');
+    const dia = String(d.getDate()).padStart(2, '0');
+    const anio = d.getFullYear();
+    return `${mes}/${dia}/${anio}`;
+}
+
+function formatearHoraAppSheet(fecha) {
+    const d = fecha || new Date();
+    let horas = d.getHours();
+    const minutos = String(d.getMinutes()).padStart(2, '0');
+    const ampm = horas >= 12 ? 'PM' : 'AM';
+    horas = horas % 12;
+    horas = horas ? horas : 12;
+    return `${horas}:${minutos} ${ampm}`;
+}
+
 async function appsheetRequest(tabla, action, rows = []) {
     const url = `${API_BASE}/${APP_ID}/tables/${encodeURIComponent(tabla)}/Action?applicationAccessKey=${ACCESS_KEY}`;
     
@@ -58,18 +69,30 @@ async function appsheetRequest(tabla, action, rows = []) {
         Rows: rows
     };
 
+    console.log(`AppSheet Request [${tabla}][${action}]:`, JSON.stringify(payload, null, 2));
+
     const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
     });
 
+    const responseText = await response.text();
+    console.log(`AppSheet Response [${tabla}]:`, responseText);
+
     if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`AppSheet Error: ${error}`);
+        throw new Error(`AppSheet Error: ${responseText}`);
     }
 
-    return response.json();
+    if (!responseText || responseText.trim() === '') {
+        return { success: true };
+    }
+
+    try {
+        return JSON.parse(responseText);
+    } catch (e) {
+        return { success: true, raw: responseText };
+    }
 }
 
 // ============================================
@@ -116,12 +139,12 @@ app.post('/api/login', async (req, res) => {
 });
 
 // ============================================
-// RUTAS - TURNOS
+// RUTAS - TURNOS (Tabla: AbrirTurno)
 // ============================================
 app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
     try {
         const { usuario, sucursal } = req.params;
-        const turnos = await appsheetRequest('Turnos', 'Find');
+        const turnos = await appsheetRequest('AbrirTurno', 'Find');
         
         const turnoActivo = turnos.find(t => 
             t.Usuario === usuario && 
@@ -134,6 +157,7 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
             turnoActivo: turnoActivo || null 
         });
     } catch (error) {
+        console.error('Error verificando turno:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -153,12 +177,10 @@ app.post('/api/turnos/abrir', async (req, res) => {
         } = req.body;
 
         const ahora = new Date();
-        const fecha = ahora.toLocaleDateString('es-MX');
-        const hora = ahora.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
-        const id = `TRN-${Date.now()}`;
+        const fecha = formatearFechaAppSheet(ahora);
+        const hora = formatearHoraAppSheet(ahora);
 
         const turnoData = {
-            ID: id,
             Fecha: fecha,
             'Hora Apertura': hora,
             Usuario: usuario,
@@ -173,14 +195,21 @@ app.post('/api/turnos/abrir', async (req, res) => {
             'EUR a MXN': parseFloat(tasaEUR) || 19
         };
 
-        await appsheetRequest('Turnos', 'Add', [turnoData]);
+        const result = await appsheetRequest('AbrirTurno', 'Add', [turnoData]);
+        
+        // Obtener el ID generado
+        let turnoId = 'TRN-' + Date.now();
+        if (result && result.Rows && result.Rows[0] && result.Rows[0].ID) {
+            turnoId = result.Rows[0].ID;
+        }
 
         res.json({ 
             success: true, 
-            turnoId: id,
+            turnoId: turnoId,
             mensaje: 'Turno abierto exitosamente'
         });
     } catch (error) {
+        console.error('Error abriendo turno:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -199,7 +228,7 @@ app.post('/api/turnos/cerrar', async (req, res) => {
         } = req.body;
 
         const ahora = new Date();
-        const horaCierre = ahora.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+        const horaCierre = formatearHoraAppSheet(ahora);
 
         const totalMXN = 
             (parseFloat(monedas1) || 0) * 1 +
@@ -218,11 +247,30 @@ app.post('/api/turnos/cerrar', async (req, res) => {
             ID: turnoId,
             'Hora de Cierre': horaCierre,
             Estado: 'Cerrado',
+            'Monedas de $1 MXN': parseFloat(monedas1) || 0,
+            'Monedas de $2 MXN': parseFloat(monedas2) || 0,
+            'Monedas de $5 MXN': parseFloat(monedas5) || 0,
+            'Monedas de $10 MXN': parseFloat(monedas10) || 0,
+            'Monedas de $20 MXN': parseFloat(monedas20) || 0,
+            'Billetes de $20 MXN': parseFloat(billetes20) || 0,
+            'Billetes de $50 MXN': parseFloat(billetes50) || 0,
+            'Billetes de $100 MXN': parseFloat(billetes100) || 0,
+            'Billetes de $200 MXN': parseFloat(billetes200) || 0,
+            'Billetes de $500 MXN': parseFloat(billetes500) || 0,
+            'Billetes de $1000 MXN': parseFloat(billetes1000) || 0,
             'Total MXN (Calculado)': totalMXN,
+            '💵 USD': parseFloat(conteoUSD) || 0,
+            '🍁 CAD': parseFloat(conteoCAD) || 0,
+            '🇪🇺 EUR': parseFloat(conteoEUR) || 0,
+            'BBVA Nacional': parseFloat(bbvaNacional) || 0,
+            'BBVA Internacional': parseFloat(bbvaInternacional) || 0,
+            'Clip Nacional': parseFloat(clipNacional) || 0,
+            'Clip Internacional': parseFloat(clipInternacional) || 0,
+            'Transferencia electrónica de fondos': parseFloat(transferencia) || 0,
             Observaciones: observaciones || ''
         };
 
-        await appsheetRequest('Turnos', 'Edit', [updateData]);
+        await appsheetRequest('AbrirTurno', 'Edit', [updateData]);
 
         res.json({ 
             success: true, 
@@ -230,6 +278,7 @@ app.post('/api/turnos/cerrar', async (req, res) => {
             mensaje: 'Turno cerrado exitosamente'
         });
     } catch (error) {
+        console.error('Error cerrando turno:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -259,6 +308,7 @@ app.get('/api/productos', async (req, res) => {
 
         res.json({ success: true, productos: productosFormateados });
     } catch (error) {
+        console.error('Error obteniendo productos:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -280,6 +330,7 @@ app.get('/api/clientes', async (req, res) => {
 
         res.json({ success: true, clientes: clientesFormateados });
     } catch (error) {
+        console.error('Error obteniendo clientes:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -303,6 +354,7 @@ app.post('/api/clientes', async (req, res) => {
 
         res.json({ success: true, codigo: clienteData.Codigo });
     } catch (error) {
+        console.error('Error agregando cliente:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -316,6 +368,7 @@ app.get('/api/metodos-pago', async (req, res) => {
         const lista = metodos.map(m => m.Nombre || m.NOMBRE || 'Sin nombre');
         res.json({ success: true, metodos: lista.length > 0 ? lista : ['Efectivo', 'Tarjeta', 'Transferencia'] });
     } catch (error) {
+        console.error('Error obteniendo métodos de pago:', error);
         res.json({ success: true, metodos: ['Efectivo', 'Tarjeta', 'Transferencia'] });
     }
 });
@@ -337,6 +390,7 @@ app.get('/api/descuentos', async (req, res) => {
 
         res.json({ success: true, descuentos: descuentosFormateados });
     } catch (error) {
+        console.error('Error obteniendo descuentos:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -368,6 +422,7 @@ app.get('/api/promociones', async (req, res) => {
 
         res.json({ success: true, promociones: promoActivas });
     } catch (error) {
+        console.error('Error obteniendo promociones:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -430,6 +485,7 @@ app.post('/api/ventas', async (req, res) => {
             mensaje: 'Venta registrada exitosamente'
         });
     } catch (error) {
+        console.error('Error registrando venta:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -441,7 +497,7 @@ app.get('/', (req, res) => {
     res.json({ 
         status: 'OK', 
         servicio: 'UMO POS API',
-        version: '1.0.0',
+        version: '1.0.1',
         cors: 'enabled'
     });
 });
