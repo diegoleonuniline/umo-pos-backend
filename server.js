@@ -365,7 +365,7 @@ app.post('/api/clientes', async (req, res) => {
 app.get('/api/metodos-pago', async (req, res) => {
     try {
         const metodos = await appsheetRequest('Metodos de pago', 'Find');
-        const lista = metodos.map(m => m.Nombre || m.NOMBRE || 'Sin nombre');
+        const lista = metodos.map(m => m['Metodo de pago'] || m['Método de pago'] || m['METODO DE PAGO'] || 'Sin nombre');
         res.json({ success: true, metodos: lista.length > 0 ? lista : ['Efectivo', 'Tarjeta', 'Transferencia'] });
     } catch (error) {
         console.error('Error obteniendo métodos de pago:', error);
