@@ -670,6 +670,208 @@ app.post('/api/ventas', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+// ============================================
+// RUTAS - VENTAS DEL TURNO
+// ============================================
+
+// Obtener ventas de un turno
+app.get('/api/ventas/turno/:turnoId', async (req, res) => {
+    try {
+        const { turnoId } = req.params;
+        
+        const ventas = await appsheetRequest('Ventas', 'Find');
+        
+        const ventasTurno = ventas
+            .filter(v => String(v.TurnoId || '').trim() === String(turnoId).trim())
+            .map(v => ({
+                idVenta: v.IdVenta || v.ID,
+                fecha: v.Fecha || '',
+                hora: v.Hora || v['Hora de Venta'] || '',
+                cliente: v.Cliente || 'Público General',
+                vendedor: v.Vendedor || '',
+                total: parseFloat(v.Total || v['Total Venta'] || 0),
+                estado: v.Estado || 'Completada',
+                descuento: v.TipoDescuento || ''
+            }))
+            .sort((a, b) => b.idVenta.localeCompare(a.idVenta));
+
+        res.json({ success: true, ventas: ventasTurno });
+    } catch (error) {
+        console.error('Error obteniendo ventas del turno:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Obtener detalle de una venta (productos + pagos)
+app.get('/api/ventas/:idVenta/detalle', async (req, res) => {
+    try {
+        const { idVenta } = req.params;
+        
+        // Obtener venta principal
+        const ventas = await appsheetRequest('Ventas', 'Find');
+        const venta = ventas.find(v => 
+            String(v.IdVenta || v.ID).trim() === String(idVenta).trim()
+        );
+        
+        if (!venta) {
+            return res.status(404).json({ success: false, error: 'Venta no encontrada' });
+        }
+        
+        // Obtener detalles (productos)
+        const detalles = await appsheetRequest('Detalle Venta', 'Find');
+        const items = detalles
+            .filter(d => String(d.Ventas || '').trim() === String(idVenta).trim())
+            .map(d => ({
+                id: d.ID,
+                producto: d.Producto,
+                cantidad: parseInt(d.Cantidad) || 1,
+                precio: parseFloat(d.Precio) || 0,
+                subtotal: parseFloat(d.SubTotal) || 0,
+                descuento: parseFloat(d.Descuento) || 0,
+                total: parseFloat(d.Total) || 0,
+                estado: d.Estado || 'Activo'
+            }));
+        
+        // Obtener pagos
+        const pagosTabla = await appsheetRequest('Pagos', 'Find');
+        const pagos = pagosTabla
+            .filter(p => String(p.Ventas || '').trim() === String(idVenta).trim())
+            .map(p => ({
+                id: p.Id || p.ID,
+                monto: parseFloat(p.Monto) || 0,
+                moneda: p.Moneda || 'MXN',
+                metodo: p.Metodo || 'Efectivo',
+                tasa: parseFloat(p['Tasa de Cambio']) || 1,
+                estado: p.Estado || 'Activo'
+            }));
+
+        res.json({ 
+            success: true, 
+            venta: {
+                idVenta: venta.IdVenta || venta.ID,
+                fecha: venta.Fecha || '',
+                hora: venta.Hora || '',
+                cliente: venta.Cliente || 'Público General',
+                vendedor: venta.Vendedor || '',
+                sucursal: venta.Sucursal || '',
+                estado: venta.Estado || 'Completada',
+                tipoDescuento: venta.TipoDescuento || '',
+                observaciones: venta.Observaciones || ''
+            },
+            items,
+            pagos
+        });
+    } catch (error) {
+        console.error('Error obteniendo detalle de venta:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Cancelar venta completa
+app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
+    try {
+        const { idVenta } = req.params;
+        const { motivo, usuario } = req.body;
+        
+        // Actualizar estado de la venta
+        await appsheetRequest('Ventas', 'Edit', [{
+            IdVenta: idVenta,
+            Estado: 'Cancelada',
+            Observaciones: `CANCELADA: ${motivo || 'Sin motivo'} - Por: ${usuario || 'Sistema'} - ${formatearFechaAppSheet()} ${formatearHoraAppSheet()}`
+        }]);
+        
+        // Cancelar todos los items
+        const detalles = await appsheetRequest('Detalle Venta', 'Find');
+        const itemsVenta = detalles.filter(d => 
+            String(d.Ventas || '').trim() === String(idVenta).trim()
+        );
+        
+        for (const item of itemsVenta) {
+            await appsheetRequest('Detalle Venta', 'Edit', [{
+                ID: item.ID,
+                Estado: 'Cancelado'
+            }]);
+        }
+        
+        // Cancelar todos los pagos
+        const pagosTabla = await appsheetRequest('Pagos', 'Find');
+        const pagosVenta = pagosTabla.filter(p => 
+            String(p.Ventas || '').trim() === String(idVenta).trim()
+        );
+        
+        for (const pago of pagosVenta) {
+            await appsheetRequest('Pagos', 'Edit', [{
+                Id: pago.Id || pago.ID,
+                Estado: 'Cancelado'
+            }]);
+        }
+
+        res.json({ 
+            success: true, 
+            mensaje: 'Venta cancelada exitosamente',
+            itemsCancelados: itemsVenta.length,
+            pagosCancelados: pagosVenta.length
+        });
+    } catch (error) {
+        console.error('Error cancelando venta:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Cancelar item individual de una venta
+app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
+    try {
+        const { idVenta } = req.params;
+        const { itemId, motivo, usuario } = req.body;
+        
+        // Obtener el item
+        const detalles = await appsheetRequest('Detalle Venta', 'Find');
+        const item = detalles.find(d => 
+            String(d.ID).trim() === String(itemId).trim() &&
+            String(d.Ventas || '').trim() === String(idVenta).trim()
+        );
+        
+        if (!item) {
+            return res.status(404).json({ success: false, error: 'Item no encontrado' });
+        }
+        
+        // Marcar item como cancelado
+        await appsheetRequest('Detalle Venta', 'Edit', [{
+            ID: itemId,
+            Estado: 'Cancelado',
+            Observaciones: `CANCELADO: ${motivo || 'Sin motivo'} - Por: ${usuario || 'Sistema'}`
+        }]);
+        
+        // Recalcular total de la venta
+        const itemsActivos = detalles.filter(d => 
+            String(d.Ventas || '').trim() === String(idVenta).trim() &&
+            String(d.ID).trim() !== String(itemId).trim() &&
+            (d.Estado || 'Activo') !== 'Cancelado'
+        );
+        
+        const nuevoTotal = itemsActivos.reduce((sum, d) => sum + (parseFloat(d.Total) || 0), 0);
+        
+        // Actualizar venta con nuevo total
+        await appsheetRequest('Ventas', 'Edit', [{
+            IdVenta: idVenta,
+            'Total Venta': nuevoTotal,
+            Observaciones: `Item cancelado: ${item.Producto} - ${motivo || ''}`
+        }]);
+
+        res.json({ 
+            success: true, 
+            mensaje: 'Item cancelado exitosamente',
+            itemCancelado: item.Producto,
+            nuevoTotal: nuevoTotal
+        });
+    } catch (error) {
+        console.error('Error cancelando item:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+
+
 
 // ============================================
 // HEALTH CHECK
