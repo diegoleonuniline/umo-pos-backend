@@ -11,7 +11,16 @@ const APP_ID = '317b1c5c-33b0-4c4b-b3f6-40c925e05237';
 const ACCESS_KEY = 'V2-htkz3-r0477-0iLrM-Jhq7C-2uehz-liV0b-sVTAT-n23hT';
 const API_BASE = 'https://www.appsheet.com/api/v2/apps';
 
-app.use(cors());
+app.use(cors({
+    origin: [
+        'https://diegoleonuniline.github.io',
+        'http://localhost:3000',
+        'http://127.0.0.1:5500'
+    ],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+}));
 app.use(express.json());
 
 // ============================================
