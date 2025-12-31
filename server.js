@@ -11,7 +11,7 @@ const ACCESS_KEY = 'V2-htkz3-r0477-0iLrM-Jhq7C-2uehz-liV0b-sVTAT-n23hT';
 const API_BASE = 'https://www.appsheet.com/api/v2/apps';
 
 // ============================================
-// CORS - CONFIGURACIÓN COMPLETA
+// CORS - CONFIGURACIÓN
 // ============================================
 const corsOptions = {
     origin: function (origin, callback) {
@@ -60,7 +60,10 @@ function formatearHoraAppSheet(fecha) {
     return `${horas}:${minutos} ${ampm}`;
 }
 
-async function appsheetRequest(tabla, action, rows = []) {
+// ============================================
+// APPSHEET REQUEST - OPTIMIZADO CON SELECTOR
+// ============================================
+async function appsheetRequest(tabla, action, rows = [], selector = null) {
     const url = `${API_BASE}/${APP_ID}/tables/${encodeURIComponent(tabla)}/Action?applicationAccessKey=${ACCESS_KEY}`;
     
     const payload = {
@@ -68,8 +71,10 @@ async function appsheetRequest(tabla, action, rows = []) {
         Properties: { Locale: 'es-MX', Timezone: 'America/Mexico_City' },
         Rows: rows
     };
-
-    console.log(`AppSheet Request [${tabla}][${action}]:`, JSON.stringify(payload, null, 2));
+    
+    if (selector) {
+        payload.Properties.Selector = selector;
+    }
 
     const response = await fetch(url, {
         method: 'POST',
@@ -78,20 +83,19 @@ async function appsheetRequest(tabla, action, rows = []) {
     });
 
     const responseText = await response.text();
-    console.log(`AppSheet Response [${tabla}]:`, responseText);
 
     if (!response.ok) {
         throw new Error(`AppSheet Error: ${responseText}`);
     }
 
     if (!responseText || responseText.trim() === '') {
-        return { success: true };
+        return [];
     }
 
     try {
         return JSON.parse(responseText);
     } catch (e) {
-        return { success: true, raw: responseText };
+        return [];
     }
 }
 
@@ -103,10 +107,7 @@ app.post('/api/login', async (req, res) => {
         const { empleadoId, pin } = req.body;
         
         if (!empleadoId || !pin) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'ID de empleado y PIN son requeridos' 
-            });
+            return res.status(400).json({ success: false, error: 'ID de empleado y PIN son requeridos' });
         }
 
         const usuarios = await appsheetRequest('Usuarios', 'Find');
@@ -117,10 +118,7 @@ app.post('/api/login', async (req, res) => {
         );
 
         if (!usuario) {
-            return res.status(401).json({ 
-                success: false, 
-                error: 'Credenciales incorrectas' 
-            });
+            return res.status(401).json({ success: false, error: 'Credenciales incorrectas' });
         }
 
         res.json({ 
@@ -146,69 +144,29 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
     try {
         const { usuario, sucursal } = req.params;
         
-        console.log('=== BUSCANDO TURNO ===');
-        console.log('Frontend envía - usuario:', usuario, 'sucursal:', sucursal);
+        // Consultas en paralelo
+        const [usuarios, turnos] = await Promise.all([
+            appsheetRequest('Usuarios', 'Find', [], `Filter(Usuarios, [ID Empleado] = "${usuario}")`),
+            appsheetRequest('AbrirTurno', 'Find', [], `Filter(AbrirTurno, AND([Estado] = "Abierto", [Sucursal] = "${sucursal}"))`)
+        ]);
         
-        // Paso 1: Obtener nombre del usuario desde tabla Usuarios
         let nombreUsuario = null;
-        try {
-            const usuarios = await appsheetRequest('Usuarios', 'Find');
-            const usuarioEncontrado = usuarios.find(u => 
-                String(u['ID Empleado']).trim() === String(usuario).trim()
-            );
-            if (usuarioEncontrado) {
-                nombreUsuario = usuarioEncontrado['Nombre'];
-                console.log('✅ Nombre para ID', usuario, '=', nombreUsuario);
-            }
-        } catch (e) {
-            console.log('Error obteniendo usuario:', e.message);
+        if (Array.isArray(usuarios) && usuarios.length > 0) {
+            nombreUsuario = usuarios[0]['Nombre'];
         }
-        
-        // Paso 2: Buscar turno
-        const turnos = await appsheetRequest('AbrirTurno', 'Find');
-        console.log('Turnos en tabla:', Array.isArray(turnos) ? turnos.length : 0);
         
         if (!Array.isArray(turnos) || turnos.length === 0) {
             return res.json({ success: true, turnoActivo: null });
         }
         
         const turnoActivo = turnos.find(t => {
-            const tEstado = String(t.Estado || '').trim().toLowerCase();
-            if (tEstado !== 'abierto') return false;
-            
-            const tSucursal = String(t.Sucursal || '').trim().toLowerCase();
-            if (tSucursal !== sucursal.toLowerCase()) return false;
-            
             const tUsuario = String(t.Usuario || '').trim().toLowerCase();
-            
-            console.log('Comparando turno - Usuario:', tUsuario, 'Sucursal:', tSucursal);
-            
-            // Coincidir por ID directo
-            if (tUsuario === usuario.toLowerCase()) {
-                console.log('  → Match por ID');
-                return true;
-            }
-            
-            // Coincidir por nombre
-            if (nombreUsuario && tUsuario === nombreUsuario.toLowerCase()) {
-                console.log('  → Match por NOMBRE');
-                return true;
-            }
-            
+            if (tUsuario === usuario.toLowerCase()) return true;
+            if (nombreUsuario && tUsuario === nombreUsuario.toLowerCase()) return true;
             return false;
         });
 
-        console.log('=== RESULTADO ===');
-        if (turnoActivo) {
-            console.log('✅ Turno encontrado:', turnoActivo.ID);
-        } else {
-            console.log('❌ Sin turno activo');
-        }
-
-        res.json({ 
-            success: true, 
-            turnoActivo: turnoActivo || null 
-        });
+        res.json({ success: true, turnoActivo: turnoActivo || null });
     } catch (error) {
         console.error('Error verificando turno:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -217,26 +175,12 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
 
 app.post('/api/turnos/abrir', async (req, res) => {
     try {
-        const { 
-            usuario,
-            empleadoId,
-            sucursal, 
-            efectivoInicial,
-            usdInicial,
-            cadInicial,
-            eurInicial,
-            tasaUSD,
-            tasaCAD,
-            tasaEUR
-        } = req.body;
+        const { usuario, empleadoId, sucursal, efectivoInicial, usdInicial, cadInicial, eurInicial, tasaUSD, tasaCAD, tasaEUR } = req.body;
 
         const ahora = new Date();
-        const fecha = formatearFechaAppSheet(ahora);
-        const hora = formatearHoraAppSheet(ahora);
-
         const turnoData = {
-            Fecha: fecha,
-            'Hora Apertura': hora,
+            Fecha: formatearFechaAppSheet(ahora),
+            'Hora Apertura': formatearHoraAppSheet(ahora),
             Usuario: usuario,
             'ID Empleado': empleadoId || '',
             Sucursal: sucursal,
@@ -250,8 +194,6 @@ app.post('/api/turnos/abrir', async (req, res) => {
             'EUR a MXN': parseFloat(tasaEUR) || 19
         };
 
-        console.log('Abriendo turno:', turnoData);
-
         const result = await appsheetRequest('AbrirTurno', 'Add', [turnoData]);
         
         let turnoId = 'TRN-' + Date.now();
@@ -259,11 +201,7 @@ app.post('/api/turnos/abrir', async (req, res) => {
             turnoId = result.Rows[0].ID;
         }
 
-        res.json({ 
-            success: true, 
-            turnoId: turnoId,
-            mensaje: 'Turno abierto exitosamente'
-        });
+        res.json({ success: true, turnoId, mensaje: 'Turno abierto exitosamente' });
     } catch (error) {
         console.error('Error abriendo turno:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -272,36 +210,17 @@ app.post('/api/turnos/abrir', async (req, res) => {
 
 app.post('/api/turnos/cerrar', async (req, res) => {
     try {
-        const { 
-            turnoId,
-            monedas1, monedas2, monedas5, monedas10, monedas20,
-            billetes20, billetes50, billetes100, billetes200, billetes500, billetes1000,
-            conteoUSD, conteoCAD, conteoEUR,
-            bbvaNacional, bbvaInternacional,
-            clipNacional, clipInternacional,
-            transferencia,
-            observaciones
-        } = req.body;
-
-        const ahora = new Date();
-        const horaCierre = formatearHoraAppSheet(ahora);
+        const { turnoId, monedas1, monedas2, monedas5, monedas10, monedas20, billetes20, billetes50, billetes100, billetes200, billetes500, billetes1000, conteoUSD, conteoCAD, conteoEUR, bbvaNacional, bbvaInternacional, clipNacional, clipInternacional, transferencia, observaciones } = req.body;
 
         const totalMXN = 
-            (parseFloat(monedas1) || 0) * 1 +
-            (parseFloat(monedas2) || 0) * 2 +
-            (parseFloat(monedas5) || 0) * 5 +
-            (parseFloat(monedas10) || 0) * 10 +
-            (parseFloat(monedas20) || 0) * 20 +
-            (parseFloat(billetes20) || 0) * 20 +
-            (parseFloat(billetes50) || 0) * 50 +
-            (parseFloat(billetes100) || 0) * 100 +
-            (parseFloat(billetes200) || 0) * 200 +
-            (parseFloat(billetes500) || 0) * 500 +
-            (parseFloat(billetes1000) || 0) * 1000;
+            (parseFloat(monedas1) || 0) * 1 + (parseFloat(monedas2) || 0) * 2 + (parseFloat(monedas5) || 0) * 5 +
+            (parseFloat(monedas10) || 0) * 10 + (parseFloat(monedas20) || 0) * 20 + (parseFloat(billetes20) || 0) * 20 +
+            (parseFloat(billetes50) || 0) * 50 + (parseFloat(billetes100) || 0) * 100 + (parseFloat(billetes200) || 0) * 200 +
+            (parseFloat(billetes500) || 0) * 500 + (parseFloat(billetes1000) || 0) * 1000;
 
         const updateData = {
             ID: turnoId,
-            'Hora de Cierre': horaCierre,
+            'Hora de Cierre': formatearHoraAppSheet(),
             Estado: 'Cerrado',
             'Monedas de $1 MXN': parseFloat(monedas1) || 0,
             'Monedas de $2 MXN': parseFloat(monedas2) || 0,
@@ -327,12 +246,7 @@ app.post('/api/turnos/cerrar', async (req, res) => {
         };
 
         await appsheetRequest('AbrirTurno', 'Edit', [updateData]);
-
-        res.json({ 
-            success: true, 
-            totalMXN,
-            mensaje: 'Turno cerrado exitosamente'
-        });
+        res.json({ success: true, totalMXN, mensaje: 'Turno cerrado exitosamente' });
     } catch (error) {
         console.error('Error cerrando turno:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -346,7 +260,7 @@ app.get('/api/productos', async (req, res) => {
     try {
         const productos = await appsheetRequest('Productos', 'Find');
         
-        const productosFormateados = productos
+        const productosFormateados = (Array.isArray(productos) ? productos : [])
             .filter(p => {
                 const sePuedeVender = p['SE PUEDE VENDER'];
                 if (sePuedeVender === undefined || sePuedeVender === '') return true;
@@ -376,7 +290,7 @@ app.get('/api/clientes', async (req, res) => {
     try {
         const clientes = await appsheetRequest('Clientes', 'Find');
         
-        const clientesFormateados = clientes.map(c => ({
+        const clientesFormateados = (Array.isArray(clientes) ? clientes : []).map(c => ({
             codigo: c['Codigo'] || c['CODIGO'] || c['Id'] || '',
             nombre: c['Nombre'] || c['NOMBRE'] || 'Sin nombre',
             correo: c['Correo'] || c['CORREO'] || '',
@@ -407,7 +321,6 @@ app.post('/api/clientes', async (req, res) => {
         };
 
         await appsheetRequest('Clientes', 'Add', [clienteData]);
-
         res.json({ success: true, codigo: clienteData.Codigo });
     } catch (error) {
         console.error('Error agregando cliente:', error);
@@ -421,10 +334,9 @@ app.post('/api/clientes', async (req, res) => {
 app.get('/api/metodos-pago', async (req, res) => {
     try {
         const metodos = await appsheetRequest('Metodos de pago', 'Find');
-        const lista = metodos.map(m => m['Metodo de pago'] || m['Método de pago'] || m['METODO DE PAGO'] || 'Sin nombre');
+        const lista = (Array.isArray(metodos) ? metodos : []).map(m => m['Metodo de pago'] || m['Método de pago'] || m['METODO DE PAGO'] || 'Sin nombre');
         res.json({ success: true, metodos: lista.length > 0 ? lista : ['Efectivo', 'Tarjeta', 'Transferencia'] });
     } catch (error) {
-        console.error('Error obteniendo métodos de pago:', error);
         res.json({ success: true, metodos: ['Efectivo', 'Tarjeta', 'Transferencia'] });
     }
 });
@@ -436,7 +348,7 @@ app.get('/api/descuentos', async (req, res) => {
     try {
         const descuentos = await appsheetRequest('Tabla Descuentos', 'Find');
         
-        const descuentosFormateados = descuentos.map((d, i) => {
+        const descuentosFormateados = (Array.isArray(descuentos) ? descuentos : []).map((d, i) => {
             const id = d.Id || d.ID || `DES-${i+1}`;
             const nombre = d.Nombre || d.NOMBRE || '';
             const grupo = d.Grupo || d.GRUPO || '';
@@ -447,30 +359,16 @@ app.get('/api/descuentos', async (req, res) => {
             if (rawPct) {
                 let s = String(rawPct).replace('%', '').replace(',', '.').trim();
                 porcentaje = parseFloat(s) || 0;
-                if (porcentaje > 0 && porcentaje <= 1) {
-                    porcentaje = porcentaje * 100;
-                }
+                if (porcentaje > 0 && porcentaje <= 1) porcentaje = porcentaje * 100;
             }
             
             let etiqueta = '';
-            if (grupo && metodoPago) {
-                etiqueta = `${grupo} + ${metodoPago} (${porcentaje}%)`;
-            } else if (grupo) {
-                etiqueta = `Grupo: ${grupo} (${porcentaje}%)`;
-            } else if (metodoPago) {
-                etiqueta = `Método: ${metodoPago} (${porcentaje}%)`;
-            } else {
-                etiqueta = `${nombre || 'Descuento'} (${porcentaje}%)`;
-            }
+            if (grupo && metodoPago) etiqueta = `${grupo} + ${metodoPago} (${porcentaje}%)`;
+            else if (grupo) etiqueta = `Grupo: ${grupo} (${porcentaje}%)`;
+            else if (metodoPago) etiqueta = `Método: ${metodoPago} (${porcentaje}%)`;
+            else etiqueta = `${nombre || 'Descuento'} (${porcentaje}%)`;
 
-            return {
-                id: String(id).trim(),
-                nombre: String(nombre).trim(),
-                grupo: String(grupo).trim(),
-                metodoPago: String(metodoPago).trim(),
-                porcentaje: porcentaje,
-                etiqueta: etiqueta
-            };
+            return { id: String(id).trim(), nombre: String(nombre).trim(), grupo: String(grupo).trim(), metodoPago: String(metodoPago).trim(), porcentaje, etiqueta };
         });
 
         res.json({ success: true, descuentos: descuentosFormateados });
@@ -480,22 +378,13 @@ app.get('/api/descuentos', async (req, res) => {
     }
 });
 
-// ============================================
-// CALCULAR DESCUENTO AUTOMÁTICO
-// ============================================
 app.post('/api/descuentos/calcular', async (req, res) => {
     try {
         const { grupoCliente, metodoPago } = req.body;
-        
         const descuentos = await appsheetRequest('Tabla Descuentos', 'Find');
         
-        if (!descuentos || descuentos.length === 0) {
-            return res.json({ 
-                success: true, 
-                porcentaje: 0, 
-                descripcion: 'Sin descuento', 
-                id: null 
-            });
+        if (!Array.isArray(descuentos) || descuentos.length === 0) {
+            return res.json({ success: true, porcentaje: 0, descripcion: 'Sin descuento', id: null });
         }
         
         const grupoNorm = (grupoCliente || '').toLowerCase().trim();
@@ -509,67 +398,33 @@ app.post('/api/descuentos/calcular', async (req, res) => {
             if (rawPct) {
                 let s = String(rawPct).replace('%', '').replace(',', '.').trim();
                 porcentaje = parseFloat(s) || 0;
-                if (porcentaje > 0 && porcentaje <= 1) {
-                    porcentaje = porcentaje * 100;
-                }
+                if (porcentaje > 0 && porcentaje <= 1) porcentaje = porcentaje * 100;
             }
-            return {
-                id: d.Id || d.ID || '',
-                grupo: grupo,
-                metodoPago: metodo,
-                porcentaje: porcentaje
-            };
+            return { id: d.Id || d.ID || '', grupo, metodoPago: metodo, porcentaje };
         });
         
+        // Prioridad 1: Grupo + Método
         for (let d of descuentosParsed) {
-            const grupoDesc = d.grupo.toLowerCase();
-            const metodoDesc = d.metodoPago.toLowerCase();
-            
-            if (grupoDesc && metodoDesc && grupoDesc === grupoNorm && metodoDesc === metodoNorm) {
-                return res.json({
-                    success: true,
-                    porcentaje: d.porcentaje,
-                    descripcion: `${d.grupo} + ${d.metodoPago}`,
-                    id: d.id
-                });
+            if (d.grupo.toLowerCase() === grupoNorm && d.metodoPago.toLowerCase() === metodoNorm && d.grupo && d.metodoPago) {
+                return res.json({ success: true, porcentaje: d.porcentaje, descripcion: `${d.grupo} + ${d.metodoPago}`, id: d.id });
             }
         }
         
+        // Prioridad 2: Solo grupo
         for (let d of descuentosParsed) {
-            const grupoDesc = d.grupo.toLowerCase();
-            const metodoDesc = d.metodoPago;
-            
-            if (grupoDesc && !metodoDesc && grupoDesc === grupoNorm) {
-                return res.json({
-                    success: true,
-                    porcentaje: d.porcentaje,
-                    descripcion: `Grupo: ${d.grupo}`,
-                    id: d.id
-                });
+            if (d.grupo.toLowerCase() === grupoNorm && !d.metodoPago && d.grupo) {
+                return res.json({ success: true, porcentaje: d.porcentaje, descripcion: `Grupo: ${d.grupo}`, id: d.id });
             }
         }
         
+        // Prioridad 3: Solo método
         for (let d of descuentosParsed) {
-            const grupoDesc = d.grupo;
-            const metodoDesc = d.metodoPago.toLowerCase();
-            
-            if (!grupoDesc && metodoDesc && metodoDesc === metodoNorm) {
-                return res.json({
-                    success: true,
-                    porcentaje: d.porcentaje,
-                    descripcion: `Método: ${d.metodoPago}`,
-                    id: d.id
-                });
+            if (d.metodoPago.toLowerCase() === metodoNorm && !d.grupo && d.metodoPago) {
+                return res.json({ success: true, porcentaje: d.porcentaje, descripcion: `Método: ${d.metodoPago}`, id: d.id });
             }
         }
         
-        res.json({ 
-            success: true, 
-            porcentaje: 0, 
-            descripcion: 'Sin descuento', 
-            id: null 
-        });
-        
+        res.json({ success: true, porcentaje: 0, descripcion: 'Sin descuento', id: null });
     } catch (error) {
         console.error('Error calculando descuento:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -581,25 +436,23 @@ app.post('/api/descuentos/calcular', async (req, res) => {
 // ============================================
 app.get('/api/promociones', async (req, res) => {
     try {
-        const promociones = await appsheetRequest('Promociones', 'Find');
+        const promociones = await appsheetRequest('Promociones', 'Find', [], `Filter(Promociones, [Estado] = "Activa")`);
         
-        const promoActivas = promociones
-            .filter(p => p.Estado === 'Activa')
-            .map(p => ({
-                id: p.Id,
-                basadaEn: p['Basada en'],
-                forma: p.Forma,
-                categoria: p.Categoria || '',
-                productos: p.Productos ? String(p.Productos).split(',').map(s => s.trim()) : [],
-                diasPromocion: p['Dias de Promocion'] || '',
-                fechaInicio: p['Fecha Inicio'],
-                fechaFin: p['Fecha Fin'],
-                porcentaje: (parseFloat(p['PorCentaje de Descuento']) || 0) * 100,
-                precio: parseFloat(p.Precio) || 0,
-                cantidadPagada: parseInt(p['Cantidad Pagada']) || 0,
-                cantidadLlevar: parseInt(p['Cantidad a Llevar']) || 0,
-                etiqueta: p.Etiqueta || ''
-            }));
+        const promoActivas = (Array.isArray(promociones) ? promociones : []).map(p => ({
+            id: p.Id,
+            basadaEn: p['Basada en'],
+            forma: p.Forma,
+            categoria: p.Categoria || '',
+            productos: p.Productos ? String(p.Productos).split(',').map(s => s.trim()) : [],
+            diasPromocion: p['Dias de Promocion'] || '',
+            fechaInicio: p['Fecha Inicio'],
+            fechaFin: p['Fecha Fin'],
+            porcentaje: (parseFloat(p['PorCentaje de Descuento']) || 0) * 100,
+            precio: parseFloat(p.Precio) || 0,
+            cantidadPagada: parseInt(p['Cantidad Pagada']) || 0,
+            cantidadLlevar: parseInt(p['Cantidad a Llevar']) || 0,
+            etiqueta: p.Etiqueta || ''
+        }));
 
         res.json({ success: true, promociones: promoActivas });
     } catch (error) {
@@ -624,65 +477,62 @@ app.post('/api/ventas', async (req, res) => {
             Observaciones: venta.Observaciones || '',
             'Descuento Extra': parseFloat(venta.DescuentoExtra) || 0,
             'Agregado por': venta.Vendedor,
-            TurnoId: venta.TurnoId || ''
+            TurnoId: venta.TurnoId || '',
+            'Estado Venta': 'Cerrada'
         };
 
-        await appsheetRequest('Ventas', 'Add', [ventaData]);
+        // Preparar datos
+        const detallesData = (detalles || []).map(d => ({
+            ID: d.ID,
+            Ventas: venta.IdVenta,
+            Producto: d.Producto,
+            Cantidad: d.Cantidad,
+            Precio: d.Precio,
+            SubTotal: d.SubTotal,
+            Descuento: d.Descuento,
+            Total: d.Total,
+            Status: 'Activo'
+        }));
 
-        if (detalles && detalles.length > 0) {
-            const detallesData = detalles.map(d => ({
-                ID: d.ID,
-                Ventas: venta.IdVenta,
-                Producto: d.Producto,
-                Cantidad: d.Cantidad,
-                Precio: d.Precio,
-                SubTotal: d.SubTotal,
-                Descuento: d.Descuento,
-                Total: d.Total
-            }));
-            await appsheetRequest('Detalle Venta', 'Add', detallesData);
-        }
+        const pagosData = (pagos || []).map(p => ({
+            Id: p.Id,
+            Ventas: venta.IdVenta,
+            Monto: p.Monto,
+            Moneda: p.Moneda,
+            Metodo: p.Metodo,
+            'Tasa de Cambio': p['Tasa de Cambio'] || 1,
+            SucursaldeRegistro: venta.Sucursal,
+            'Grupo Cliente': venta.GrupoCliente || '',
+            Cliente: venta.Cliente,
+            Vendedor: venta.Vendedor,
+            Estado: 'Activo'
+        }));
 
-        if (pagos && pagos.length > 0) {
-            const pagosData = pagos.map(p => ({
-                Id: p.Id,
-                Ventas: venta.IdVenta,
-                Monto: p.Monto,
-                Moneda: p.Moneda,
-                Metodo: p.Metodo,
-                'Tasa de Cambio': p['Tasa de Cambio'] || 1,
-                SucursaldeRegistro: venta.Sucursal,
-                'Grupo Cliente': venta.GrupoCliente || '',
-                Cliente: venta.Cliente,
-                Vendedor: venta.Vendedor,
-                Estado: 'Cerrado'
-            }));
-            await appsheetRequest('Pagos', 'Add', pagosData);
-        }
+        // Ejecutar en paralelo
+        await Promise.all([
+            appsheetRequest('Ventas', 'Add', [ventaData]),
+            detallesData.length > 0 ? appsheetRequest('Detalle Venta', 'Add', detallesData) : Promise.resolve(),
+            pagosData.length > 0 ? appsheetRequest('Pagos', 'Add', pagosData) : Promise.resolve()
+        ]);
 
-        res.json({ 
-            success: true, 
-            ventaId: venta.IdVenta,
-            mensaje: 'Venta registrada exitosamente'
-        });
+        res.json({ success: true, ventaId: venta.IdVenta, mensaje: 'Venta registrada exitosamente' });
     } catch (error) {
         console.error('Error registrando venta:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
-// ============================================
-// RUTAS - VENTAS DEL TURNO
-// ============================================
 
-// Obtener ventas de un turno
+// ============================================
+// VENTAS DEL TURNO - OPTIMIZADO
+// ============================================
 app.get('/api/ventas/turno/:turnoId', async (req, res) => {
     try {
         const { turnoId } = req.params;
         
-        const ventas = await appsheetRequest('Ventas', 'Find');
+        // Filtrar desde AppSheet
+        const ventas = await appsheetRequest('Ventas', 'Find', [], `Filter(Ventas, [TurnoId] = "${turnoId}")`);
         
-        const ventasTurno = ventas
-            .filter(v => String(v.TurnoId || '').trim() === String(turnoId).trim())
+        const ventasTurno = (Array.isArray(ventas) ? ventas : [])
             .map(v => ({
                 idVenta: v.IdVenta || v.ID,
                 fecha: v.Fecha || '',
@@ -702,48 +552,45 @@ app.get('/api/ventas/turno/:turnoId', async (req, res) => {
     }
 });
 
-// Obtener detalle de una venta (productos + pagos)
+// ============================================
+// DETALLE VENTA - OPTIMIZADO CON PARALELO
+// ============================================
 app.get('/api/ventas/:idVenta/detalle', async (req, res) => {
     try {
         const { idVenta } = req.params;
         
-        // Obtener venta principal
-        const ventas = await appsheetRequest('Ventas', 'Find');
-        const venta = ventas.find(v => 
-            String(v.IdVenta || v.ID).trim() === String(idVenta).trim()
-        );
+        // Consultas en paralelo
+        const [ventas, detalles, pagosTabla] = await Promise.all([
+            appsheetRequest('Ventas', 'Find', [], `Filter(Ventas, [IdVenta] = "${idVenta}")`),
+            appsheetRequest('Detalle Venta', 'Find', [], `Filter(Detalle Venta, [Ventas] = "${idVenta}")`),
+            appsheetRequest('Pagos', 'Find', [], `Filter(Pagos, [Ventas] = "${idVenta}")`)
+        ]);
+        
+        const venta = Array.isArray(ventas) && ventas.length > 0 ? ventas[0] : null;
         
         if (!venta) {
             return res.status(404).json({ success: false, error: 'Venta no encontrada' });
         }
         
-        // Obtener detalles (productos)
-        const detalles = await appsheetRequest('Detalle Venta', 'Find');
-        const items = detalles
-            .filter(d => String(d.Ventas || '').trim() === String(idVenta).trim())
-            .map(d => ({
-                id: d.ID,
-                producto: d.Producto,
-                cantidad: parseInt(d.Cantidad) || 1,
-                precio: parseFloat(d.Precio) || 0,
-                subtotal: parseFloat(d.SubTotal) || 0,
-                descuento: parseFloat(d.Descuento) || 0,
-                total: parseFloat(d.Total) || 0,
-                estado: d.Estado || 'Activo'
-            }));
+        const items = (Array.isArray(detalles) ? detalles : []).map(d => ({
+            id: d.ID,
+            producto: d.Producto,
+            cantidad: parseInt(d.Cantidad) || 1,
+            precio: parseFloat(d.Precio) || 0,
+            subtotal: parseFloat(d.SubTotal) || 0,
+            descuento: parseFloat(d.Descuento) || 0,
+            total: parseFloat(d.Total) || 0,
+            estado: d.Status || 'Activo'
+        }));
         
-        // Obtener pagos
-        const pagosTabla = await appsheetRequest('Pagos', 'Find');
-        const pagos = pagosTabla
-            .filter(p => String(p.Ventas || '').trim() === String(idVenta).trim())
-            .map(p => ({
-                id: p.Id || p.ID,
-                monto: parseFloat(p.Monto) || 0,
-                moneda: p.Moneda || 'MXN',
-                metodo: p.Metodo || 'Efectivo',
-                tasa: parseFloat(p['Tasa de Cambio']) || 1,
-                estado: p.Estado || 'Activo'
-            }));
+        const pagos = (Array.isArray(pagosTabla) ? pagosTabla : []).map(p => ({
+            id: p.Id || p.ID,
+            monto: parseFloat(p.Monto) || 0,
+            moneda: p.Moneda || 'MXN',
+            metodo: p.Metodo || 'Efectivo',
+            tasa: parseFloat(p['Tasa de Cambio']) || 1,
+            estado: p.Estado || 'Activo'
+        }));
 
         res.json({ 
             success: true, 
@@ -754,7 +601,7 @@ app.get('/api/ventas/:idVenta/detalle', async (req, res) => {
                 cliente: venta.Cliente || 'Público General',
                 vendedor: venta.Vendedor || '',
                 sucursal: venta.Sucursal || '',
-                estado: venta.Estado || 'Completada',
+                estado: venta['Estado Venta'] || 'Completada',
                 tipoDescuento: venta.TipoDescuento || '',
                 observaciones: venta.Observaciones || ''
             },
@@ -767,45 +614,53 @@ app.get('/api/ventas/:idVenta/detalle', async (req, res) => {
     }
 });
 
-// Cancelar venta completa
+// ============================================
+// CANCELAR VENTA - OPTIMIZADO
+// ============================================
 app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
     try {
         const { idVenta } = req.params;
         const { motivo, usuario } = req.body;
         
-        // Actualizar estado de la venta
-        await appsheetRequest('Ventas', 'Edit', [{
-            IdVenta: idVenta,
-            'Estado Venta': 'Cancelada',
-            'Motivo Cancelacion': `${motivo || 'Sin motivo'} - Por: ${usuario || 'Sistema'} - ${formatearFechaAppSheet()} ${formatearHoraAppSheet()}`
-        }]);
+        // Obtener items y pagos en paralelo
+        const [detalles, pagosTabla] = await Promise.all([
+            appsheetRequest('Detalle Venta', 'Find', [], `Filter(Detalle Venta, [Ventas] = "${idVenta}")`),
+            appsheetRequest('Pagos', 'Find', [], `Filter(Pagos, [Ventas] = "${idVenta}")`)
+        ]);
         
-        // Cancelar todos los items
-        const detalles = await appsheetRequest('Detalle Venta', 'Find');
-        const itemsVenta = detalles.filter(d => 
-            String(d.Ventas || '').trim() === String(idVenta).trim()
-        );
+        const itemsVenta = Array.isArray(detalles) ? detalles : [];
+        const pagosVenta = Array.isArray(pagosTabla) ? pagosTabla : [];
         
+        // Preparar actualizaciones
+        const motivoCompleto = `${motivo || 'Sin motivo'} - Por: ${usuario || 'Sistema'} - ${formatearFechaAppSheet()} ${formatearHoraAppSheet()}`;
+        
+        const promesas = [
+            appsheetRequest('Ventas', 'Edit', [{
+                IdVenta: idVenta,
+                'Estado Venta': 'Cancelada',
+                'Motivo Cancelacion': motivoCompleto
+            }])
+        ];
+        
+        // Cancelar items
         for (const item of itemsVenta) {
-            await appsheetRequest('Detalle Venta', 'Edit', [{
+            promesas.push(appsheetRequest('Detalle Venta', 'Edit', [{
                 ID: item.ID,
                 Status: 'Cancelado',
                 'Motivo Cancelacion': motivo || 'Venta cancelada'
-            }]);
+            }]));
         }
         
-        // Cancelar todos los pagos
-        const pagosTabla = await appsheetRequest('Pagos', 'Find');
-        const pagosVenta = pagosTabla.filter(p => 
-            String(p.Ventas || '').trim() === String(idVenta).trim()
-        );
-        
+        // Cancelar pagos
         for (const pago of pagosVenta) {
-            await appsheetRequest('Pagos', 'Edit', [{
+            promesas.push(appsheetRequest('Pagos', 'Edit', [{
                 Id: pago.Id || pago.ID,
                 Estado: 'Cancelado'
-            }]);
+            }]));
         }
+        
+        // Ejecutar todo en paralelo
+        await Promise.all(promesas);
 
         res.json({ 
             success: true, 
@@ -819,49 +674,49 @@ app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
     }
 });
 
-// Cancelar item individual de una venta
+// ============================================
+// CANCELAR ITEM - OPTIMIZADO
+// ============================================
 app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
     try {
         const { idVenta } = req.params;
         const { itemId, motivo, usuario } = req.body;
         
-        const detalles = await appsheetRequest('Detalle Venta', 'Find');
-        const item = detalles.find(d => 
-            String(d.ID).trim() === String(itemId).trim() &&
-            String(d.Ventas || '').trim() === String(idVenta).trim()
-        );
+        // Obtener items de la venta
+        const detalles = await appsheetRequest('Detalle Venta', 'Find', [], `Filter(Detalle Venta, [Ventas] = "${idVenta}")`);
+        
+        const items = Array.isArray(detalles) ? detalles : [];
+        const item = items.find(d => String(d.ID).trim() === String(itemId).trim());
         
         if (!item) {
             return res.status(404).json({ success: false, error: 'Item no encontrado' });
         }
         
-        // Marcar item como cancelado
-        await appsheetRequest('Detalle Venta', 'Edit', [{
-            ID: itemId,
-            Status: 'Cancelado',
-            'Motivo Cancelacion': `${motivo || 'Sin motivo'} - Por: ${usuario || 'Sistema'}`
-        }]);
-        
-        // Recalcular total de la venta
-        const itemsActivos = detalles.filter(d => 
-            String(d.Ventas || '').trim() === String(idVenta).trim() &&
+        // Calcular nuevo total
+        const itemsActivos = items.filter(d => 
             String(d.ID).trim() !== String(itemId).trim() &&
             (d.Status || 'Activo') !== 'Cancelado'
         );
-        
         const nuevoTotal = itemsActivos.reduce((sum, d) => sum + (parseFloat(d.Total) || 0), 0);
         
-        // Actualizar venta con nuevo total
-        await appsheetRequest('Ventas', 'Edit', [{
-            IdVenta: idVenta,
-            'Total Venta': nuevoTotal
-        }]);
+        // Actualizar en paralelo
+        await Promise.all([
+            appsheetRequest('Detalle Venta', 'Edit', [{
+                ID: itemId,
+                Status: 'Cancelado',
+                'Motivo Cancelacion': `${motivo || 'Sin motivo'} - Por: ${usuario || 'Sistema'}`
+            }]),
+            appsheetRequest('Ventas', 'Edit', [{
+                IdVenta: idVenta,
+                'Total Venta': nuevoTotal
+            }])
+        ]);
 
         res.json({ 
             success: true, 
             mensaje: 'Item cancelado exitosamente',
             itemCancelado: item.Producto,
-            nuevoTotal: nuevoTotal
+            nuevoTotal
         });
     } catch (error) {
         console.error('Error cancelando item:', error);
@@ -869,18 +724,11 @@ app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
     }
 });
 
-
-
 // ============================================
 // HEALTH CHECK
 // ============================================
 app.get('/', (req, res) => {
-    res.json({ 
-        status: 'OK', 
-        servicio: 'UMO POS API',
-        version: '1.0.2',
-        cors: 'enabled'
-    });
+    res.json({ status: 'OK', servicio: 'UMO POS API', version: '1.1.0', cors: 'enabled' });
 });
 
 app.get('/health', (req, res) => {
