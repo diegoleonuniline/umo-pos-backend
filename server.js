@@ -140,54 +140,69 @@ app.post('/api/login', async (req, res) => {
 });
 
 // ============================================
-// RUTAS - TURNOS (CORREGIDO)
+// RUTAS - TURNOS
 // ============================================
 app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
     try {
         const { usuario, sucursal } = req.params;
-        const turnos = await appsheetRequest('AbrirTurno', 'Find');
         
         console.log('=== BUSCANDO TURNO ===');
-        console.log('Usuario/ID recibido:', usuario);
-        console.log('Sucursal recibida:', sucursal);
-        console.log('Total turnos en tabla:', Array.isArray(turnos) ? turnos.length : 0);
+        console.log('Frontend envía - usuario:', usuario, 'sucursal:', sucursal);
+        
+        // Paso 1: Obtener nombre del usuario desde tabla Usuarios
+        let nombreUsuario = null;
+        try {
+            const usuarios = await appsheetRequest('Usuarios', 'Find');
+            const usuarioEncontrado = usuarios.find(u => 
+                String(u['ID Empleado']).trim() === String(usuario).trim()
+            );
+            if (usuarioEncontrado) {
+                nombreUsuario = usuarioEncontrado['Nombre'];
+                console.log('✅ Nombre para ID', usuario, '=', nombreUsuario);
+            }
+        } catch (e) {
+            console.log('Error obteniendo usuario:', e.message);
+        }
+        
+        // Paso 2: Buscar turno
+        const turnos = await appsheetRequest('AbrirTurno', 'Find');
+        console.log('Turnos en tabla:', Array.isArray(turnos) ? turnos.length : 0);
         
         if (!Array.isArray(turnos) || turnos.length === 0) {
-            console.log('No hay turnos en la tabla');
             return res.json({ success: true, turnoActivo: null });
         }
         
-        // Normalizar valores de búsqueda
-        const usuarioBuscar = String(usuario).trim().toLowerCase();
-        const sucursalBuscar = String(sucursal).trim().toLowerCase();
-        
-        // Listar todos los turnos abiertos para debug
-        const turnosAbiertos = turnos.filter(t => 
-            String(t.Estado || '').trim().toLowerCase() === 'abierto'
-        );
-        console.log('Turnos abiertos:', turnosAbiertos.length);
-        turnosAbiertos.forEach(t => {
-            console.log(`  - ID: ${t.ID}, Usuario: "${t.Usuario}", Sucursal: "${t.Sucursal}"`);
-        });
-        
-        // Buscar turno activo
         const turnoActivo = turnos.find(t => {
             const tEstado = String(t.Estado || '').trim().toLowerCase();
             if (tEstado !== 'abierto') return false;
             
             const tSucursal = String(t.Sucursal || '').trim().toLowerCase();
-            if (tSucursal !== sucursalBuscar) return false;
+            if (tSucursal !== sucursal.toLowerCase()) return false;
             
-            // El campo Usuario en AbrirTurno contiene el ID del empleado
             const tUsuario = String(t.Usuario || '').trim().toLowerCase();
             
-            return tUsuario === usuarioBuscar;
+            console.log('Comparando turno - Usuario:', tUsuario, 'Sucursal:', tSucursal);
+            
+            // Coincidir por ID directo
+            if (tUsuario === usuario.toLowerCase()) {
+                console.log('  → Match por ID');
+                return true;
+            }
+            
+            // Coincidir por nombre
+            if (nombreUsuario && tUsuario === nombreUsuario.toLowerCase()) {
+                console.log('  → Match por NOMBRE');
+                return true;
+            }
+            
+            return false;
         });
 
+        console.log('=== RESULTADO ===');
         if (turnoActivo) {
-            console.log('✅ Turno activo encontrado:', turnoActivo.ID);
+            console.log('✅ Turno encontrado:', turnoActivo.ID);
         } else {
-            console.log('❌ No se encontró turno activo');
+            console.log('❌ Sin turno activo');
         }
 
         res.json({ 
