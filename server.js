@@ -128,8 +128,9 @@ app.post('/api/login', async (req, res) => {
             usuario: {
                 id: usuario['ID Empleado'],
                 nombre: usuario['Nombre'] || usuario['NOMBRE'] || 'Usuario',
+                nombreCompleto: usuario['Nombre Completo'] || `${usuario['Nombre']} ${usuario['Apellido Paterno']} ${usuario['Apellido Materno']}`.trim(),
                 sucursal: usuario['Sucursal'] || usuario['SUCURSAL'] || 'Principal',
-                rol: usuario['Rol'] || usuario['ROL'] || 'Vendedor'
+                rol: usuario['Puesto'] || usuario['Rol'] || 'Vendedor'
             }
         });
     } catch (error) {
@@ -138,31 +139,67 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
+// ============================================
+// RUTAS - TURNOS (CORREGIDO)
+// ============================================
 app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
     try {
         const { usuario, sucursal } = req.params;
         const turnos = await appsheetRequest('AbrirTurno', 'Find');
         
-        console.log('Buscando turno para:', usuario, sucursal);
-        console.log('Turnos encontrados:', turnos.length);
+        console.log('=== BUSCANDO TURNO ===');
+        console.log('Usuario recibido:', usuario);
+        console.log('Sucursal recibida:', sucursal);
+        console.log('Total turnos en tabla:', Array.isArray(turnos) ? turnos.length : 0);
         
+        if (!Array.isArray(turnos) || turnos.length === 0) {
+            console.log('No hay turnos en la tabla');
+            return res.json({ success: true, turnoActivo: null });
+        }
+        
+        // Listar todos los turnos abiertos para debug
+        const turnosAbiertos = turnos.filter(t => 
+            String(t.Estado || '').trim().toLowerCase() === 'abierto'
+        );
+        console.log('Turnos abiertos encontrados:', turnosAbiertos.length);
+        turnosAbiertos.forEach(t => {
+            console.log(`  - ID: ${t.ID}, Usuario: "${t.Usuario}", Sucursal: "${t.Sucursal}"`);
+        });
+        
+        // Normalizar valores de búsqueda
+        const usuarioBuscar = usuario.trim().toLowerCase();
+        const sucursalBuscar = sucursal.trim().toLowerCase();
+        
+        // Buscar turno activo - múltiples criterios
         const turnoActivo = turnos.find(t => {
-            const tUsuario = String(t.Usuario || '').trim().toLowerCase();
-            const tSucursal = String(t.Sucursal || '').trim().toLowerCase();
             const tEstado = String(t.Estado || '').trim().toLowerCase();
+            if (tEstado !== 'abierto') return false;
             
-            const coincide = tUsuario === usuario.trim().toLowerCase() &&
-                            tSucursal === sucursal.trim().toLowerCase() &&
-                            tEstado === 'abierto';
+            const tSucursal = String(t.Sucursal || '').trim().toLowerCase();
+            if (tSucursal !== sucursalBuscar) return false;
             
-            if (tEstado === 'abierto') {
-                console.log('Turno abierto encontrado:', t.ID, tUsuario, tSucursal);
-            }
+            // Intentar coincidir por múltiples campos de usuario
+            const tUsuario = String(t.Usuario || '').trim().toLowerCase();
+            const tEmpleadoId = String(t['ID Empleado'] || t.EmpleadoId || t.empleadoId || '').trim().toLowerCase();
+            const tVendedor = String(t.Vendedor || '').trim().toLowerCase();
             
-            return coincide;
+            // Coincidencia exacta
+            if (tUsuario === usuarioBuscar) return true;
+            if (tEmpleadoId === usuarioBuscar) return true;
+            if (tVendedor === usuarioBuscar) return true;
+            
+            // Coincidencia parcial (el nombre está contenido)
+            if (tUsuario && tUsuario.includes(usuarioBuscar)) return true;
+            if (tUsuario && usuarioBuscar.includes(tUsuario)) return true;
+            
+            return false;
         });
 
-        console.log('Turno activo:', turnoActivo ? turnoActivo.ID : 'ninguno');
+        if (turnoActivo) {
+            console.log('✅ Turno activo encontrado:', turnoActivo.ID);
+        } else {
+            console.log('❌ No se encontró turno activo para este usuario/sucursal');
+        }
 
         res.json({ 
             success: true, 
@@ -174,10 +211,54 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
     }
 });
 
+// Ruta alternativa: buscar por ID de empleado
+app.get('/api/turnos/activo-por-id/:empleadoId/:sucursal', async (req, res) => {
+    try {
+        const { empleadoId, sucursal } = req.params;
+        const turnos = await appsheetRequest('AbrirTurno', 'Find');
+        
+        console.log('=== BUSCANDO TURNO POR ID ===');
+        console.log('EmpleadoId:', empleadoId);
+        console.log('Sucursal:', sucursal);
+        
+        if (!Array.isArray(turnos) || turnos.length === 0) {
+            return res.json({ success: true, turnoActivo: null });
+        }
+        
+        const sucursalBuscar = sucursal.trim().toLowerCase();
+        const idBuscar = String(empleadoId).trim();
+        
+        const turnoActivo = turnos.find(t => {
+            const tEstado = String(t.Estado || '').trim().toLowerCase();
+            if (tEstado !== 'abierto') return false;
+            
+            const tSucursal = String(t.Sucursal || '').trim().toLowerCase();
+            if (tSucursal !== sucursalBuscar) return false;
+            
+            // Buscar por cualquier campo que pueda contener el ID
+            const tEmpleadoId = String(t['ID Empleado'] || t.EmpleadoId || '').trim();
+            const tUsuario = String(t.Usuario || '').trim();
+            
+            return tEmpleadoId === idBuscar || tUsuario === idBuscar;
+        });
+
+        console.log('Turno encontrado:', turnoActivo ? turnoActivo.ID : 'ninguno');
+
+        res.json({ 
+            success: true, 
+            turnoActivo: turnoActivo || null 
+        });
+    } catch (error) {
+        console.error('Error verificando turno por ID:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 app.post('/api/turnos/abrir', async (req, res) => {
     try {
         const { 
-            usuario, 
+            usuario,
+            empleadoId,
             sucursal, 
             efectivoInicial,
             usdInicial,
@@ -196,6 +277,7 @@ app.post('/api/turnos/abrir', async (req, res) => {
             Fecha: fecha,
             'Hora Apertura': hora,
             Usuario: usuario,
+            'ID Empleado': empleadoId || '',
             Sucursal: sucursal,
             Estado: 'Abierto',
             Efectivo: parseFloat(efectivoInicial) || 0,
@@ -207,9 +289,10 @@ app.post('/api/turnos/abrir', async (req, res) => {
             'EUR a MXN': parseFloat(tasaEUR) || 19
         };
 
+        console.log('Abriendo turno:', turnoData);
+
         const result = await appsheetRequest('AbrirTurno', 'Add', [turnoData]);
         
-        // Obtener el ID generado
         let turnoId = 'TRN-' + Date.now();
         if (result && result.Rows && result.Rows[0] && result.Rows[0].ID) {
             turnoId = result.Rows[0].ID;
@@ -392,17 +475,142 @@ app.get('/api/descuentos', async (req, res) => {
     try {
         const descuentos = await appsheetRequest('Tabla Descuentos', 'Find');
         
-        const descuentosFormateados = descuentos.map(d => ({
-            id: d.Id || d.ID || '',
-            nombre: d.Nombre || '',
-            grupo: d.Grupo || '',
-            metodoPago: d['Metodo de Pago'] || d['Método de Pago'] || '',
-            porcentaje: parseFloat(String(d.Porcentaje || '0').replace('%', '')) || 0
-        }));
+        const descuentosFormateados = descuentos.map((d, i) => {
+            const id = d.Id || d.ID || `DES-${i+1}`;
+            const nombre = d.Nombre || d.NOMBRE || '';
+            const grupo = d.Grupo || d.GRUPO || '';
+            const metodoPago = d['Metodo de Pago'] || d['Método de Pago'] || d['METODO DE PAGO'] || '';
+            
+            let porcentaje = 0;
+            const rawPct = d.Porcentaje || d['%'] || d.PCT || 0;
+            if (rawPct) {
+                let s = String(rawPct).replace('%', '').replace(',', '.').trim();
+                porcentaje = parseFloat(s) || 0;
+                if (porcentaje > 0 && porcentaje <= 1) {
+                    porcentaje = porcentaje * 100;
+                }
+            }
+            
+            let etiqueta = '';
+            if (grupo && metodoPago) {
+                etiqueta = `${grupo} + ${metodoPago} (${porcentaje}%)`;
+            } else if (grupo) {
+                etiqueta = `Grupo: ${grupo} (${porcentaje}%)`;
+            } else if (metodoPago) {
+                etiqueta = `Método: ${metodoPago} (${porcentaje}%)`;
+            } else {
+                etiqueta = `${nombre || 'Descuento'} (${porcentaje}%)`;
+            }
+
+            return {
+                id: String(id).trim(),
+                nombre: String(nombre).trim(),
+                grupo: String(grupo).trim(),
+                metodoPago: String(metodoPago).trim(),
+                porcentaje: porcentaje,
+                etiqueta: etiqueta
+            };
+        });
 
         res.json({ success: true, descuentos: descuentosFormateados });
     } catch (error) {
         console.error('Error obteniendo descuentos:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================
+// CALCULAR DESCUENTO AUTOMÁTICO
+// ============================================
+app.post('/api/descuentos/calcular', async (req, res) => {
+    try {
+        const { grupoCliente, metodoPago } = req.body;
+        
+        const descuentos = await appsheetRequest('Tabla Descuentos', 'Find');
+        
+        if (!descuentos || descuentos.length === 0) {
+            return res.json({ 
+                success: true, 
+                porcentaje: 0, 
+                descripcion: 'Sin descuento', 
+                id: null 
+            });
+        }
+        
+        const grupoNorm = (grupoCliente || '').toLowerCase().trim();
+        const metodoNorm = (metodoPago || '').toLowerCase().trim();
+        
+        const descuentosParsed = descuentos.map(d => {
+            const grupo = String(d.Grupo || d.GRUPO || '').trim();
+            const metodo = String(d['Metodo de Pago'] || d['Método de Pago'] || d['METODO DE PAGO'] || '').trim();
+            let porcentaje = 0;
+            const rawPct = d.Porcentaje || d['%'] || d.PCT || 0;
+            if (rawPct) {
+                let s = String(rawPct).replace('%', '').replace(',', '.').trim();
+                porcentaje = parseFloat(s) || 0;
+                if (porcentaje > 0 && porcentaje <= 1) {
+                    porcentaje = porcentaje * 100;
+                }
+            }
+            return {
+                id: d.Id || d.ID || '',
+                grupo: grupo,
+                metodoPago: metodo,
+                porcentaje: porcentaje
+            };
+        });
+        
+        for (let d of descuentosParsed) {
+            const grupoDesc = d.grupo.toLowerCase();
+            const metodoDesc = d.metodoPago.toLowerCase();
+            
+            if (grupoDesc && metodoDesc && grupoDesc === grupoNorm && metodoDesc === metodoNorm) {
+                return res.json({
+                    success: true,
+                    porcentaje: d.porcentaje,
+                    descripcion: `${d.grupo} + ${d.metodoPago}`,
+                    id: d.id
+                });
+            }
+        }
+        
+        for (let d of descuentosParsed) {
+            const grupoDesc = d.grupo.toLowerCase();
+            const metodoDesc = d.metodoPago;
+            
+            if (grupoDesc && !metodoDesc && grupoDesc === grupoNorm) {
+                return res.json({
+                    success: true,
+                    porcentaje: d.porcentaje,
+                    descripcion: `Grupo: ${d.grupo}`,
+                    id: d.id
+                });
+            }
+        }
+        
+        for (let d of descuentosParsed) {
+            const grupoDesc = d.grupo;
+            const metodoDesc = d.metodoPago.toLowerCase();
+            
+            if (!grupoDesc && metodoDesc && metodoDesc === metodoNorm) {
+                return res.json({
+                    success: true,
+                    porcentaje: d.porcentaje,
+                    descripcion: `Método: ${d.metodoPago}`,
+                    id: d.id
+                });
+            }
+        }
+        
+        res.json({ 
+            success: true, 
+            porcentaje: 0, 
+            descripcion: 'Sin descuento', 
+            id: null 
+        });
+        
+    } catch (error) {
+        console.error('Error calculando descuento:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -509,7 +717,7 @@ app.get('/', (req, res) => {
     res.json({ 
         status: 'OK', 
         servicio: 'UMO POS API',
-        version: '1.0.1',
+        version: '1.0.2',
         cors: 'enabled'
     });
 });
@@ -523,160 +731,4 @@ app.get('/health', (req, res) => {
 // ============================================
 app.listen(PORT, () => {
     console.log(`🚀 UMO POS API corriendo en puerto ${PORT}`);
-});
-
-
-// ============================================
-// RUTAS - DESCUENTOS (ACTUALIZADO)
-// ============================================
-app.get('/api/descuentos', async (req, res) => {
-    try {
-        const descuentos = await appsheetRequest('Tabla Descuentos', 'Find');
-        
-        const descuentosFormateados = descuentos.map((d, i) => {
-            const id = d.Id || d.ID || `DES-${i+1}`;
-            const nombre = d.Nombre || d.NOMBRE || '';
-            const grupo = d.Grupo || d.GRUPO || '';
-            const metodoPago = d['Metodo de Pago'] || d['Método de Pago'] || d['METODO DE PAGO'] || '';
-            
-            // Parsear porcentaje
-            let porcentaje = 0;
-            const rawPct = d.Porcentaje || d['%'] || d.PCT || 0;
-            if (rawPct) {
-                let s = String(rawPct).replace('%', '').replace(',', '.').trim();
-                porcentaje = parseFloat(s) || 0;
-                // Si es decimal (0.1 = 10%), convertir
-                if (porcentaje > 0 && porcentaje <= 1) {
-                    porcentaje = porcentaje * 100;
-                }
-            }
-            
-            // Crear etiqueta
-            let etiqueta = '';
-            if (grupo && metodoPago) {
-                etiqueta = `${grupo} + ${metodoPago} (${porcentaje}%)`;
-            } else if (grupo) {
-                etiqueta = `Grupo: ${grupo} (${porcentaje}%)`;
-            } else if (metodoPago) {
-                etiqueta = `Método: ${metodoPago} (${porcentaje}%)`;
-            } else {
-                etiqueta = `${nombre || 'Descuento'} (${porcentaje}%)`;
-            }
-
-            return {
-                id: String(id).trim(),
-                nombre: String(nombre).trim(),
-                grupo: String(grupo).trim(),
-                metodoPago: String(metodoPago).trim(),
-                porcentaje: porcentaje,
-                etiqueta: etiqueta
-            };
-        });
-
-        res.json({ success: true, descuentos: descuentosFormateados });
-    } catch (error) {
-        console.error('Error obteniendo descuentos:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// ============================================
-// CALCULAR DESCUENTO AUTOMÁTICO
-// ============================================
-app.post('/api/descuentos/calcular', async (req, res) => {
-    try {
-        const { grupoCliente, metodoPago } = req.body;
-        
-        const descuentos = await appsheetRequest('Tabla Descuentos', 'Find');
-        
-        if (!descuentos || descuentos.length === 0) {
-            return res.json({ 
-                success: true, 
-                porcentaje: 0, 
-                descripcion: 'Sin descuento', 
-                id: null 
-            });
-        }
-        
-        const grupoNorm = (grupoCliente || '').toLowerCase().trim();
-        const metodoNorm = (metodoPago || '').toLowerCase().trim();
-        
-        // Parsear descuentos
-        const descuentosParsed = descuentos.map(d => {
-            const grupo = String(d.Grupo || d.GRUPO || '').trim();
-            const metodo = String(d['Metodo de Pago'] || d['Método de Pago'] || d['METODO DE PAGO'] || '').trim();
-            let porcentaje = 0;
-            const rawPct = d.Porcentaje || d['%'] || d.PCT || 0;
-            if (rawPct) {
-                let s = String(rawPct).replace('%', '').replace(',', '.').trim();
-                porcentaje = parseFloat(s) || 0;
-                if (porcentaje > 0 && porcentaje <= 1) {
-                    porcentaje = porcentaje * 100;
-                }
-            }
-            return {
-                id: d.Id || d.ID || '',
-                grupo: grupo,
-                metodoPago: metodo,
-                porcentaje: porcentaje
-            };
-        });
-        
-        // PRIORIDAD 1: Combinación exacta (grupo + método)
-        for (let d of descuentosParsed) {
-            const grupoDesc = d.grupo.toLowerCase();
-            const metodoDesc = d.metodoPago.toLowerCase();
-            
-            if (grupoDesc && metodoDesc && grupoDesc === grupoNorm && metodoDesc === metodoNorm) {
-                return res.json({
-                    success: true,
-                    porcentaje: d.porcentaje,
-                    descripcion: `${d.grupo} + ${d.metodoPago}`,
-                    id: d.id
-                });
-            }
-        }
-        
-        // PRIORIDAD 2: Solo grupo
-        for (let d of descuentosParsed) {
-            const grupoDesc = d.grupo.toLowerCase();
-            const metodoDesc = d.metodoPago;
-            
-            if (grupoDesc && !metodoDesc && grupoDesc === grupoNorm) {
-                return res.json({
-                    success: true,
-                    porcentaje: d.porcentaje,
-                    descripcion: `Grupo: ${d.grupo}`,
-                    id: d.id
-                });
-            }
-        }
-        
-        // PRIORIDAD 3: Solo método de pago
-        for (let d of descuentosParsed) {
-            const grupoDesc = d.grupo;
-            const metodoDesc = d.metodoPago.toLowerCase();
-            
-            if (!grupoDesc && metodoDesc && metodoDesc === metodoNorm) {
-                return res.json({
-                    success: true,
-                    porcentaje: d.porcentaje,
-                    descripcion: `Método: ${d.metodoPago}`,
-                    id: d.id
-                });
-            }
-        }
-        
-        // Sin descuento aplicable
-        res.json({ 
-            success: true, 
-            porcentaje: 0, 
-            descripcion: 'Sin descuento', 
-            id: null 
-        });
-        
-    } catch (error) {
-        console.error('Error calculando descuento:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
 });
