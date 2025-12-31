@@ -416,6 +416,48 @@ app.get('/api/promociones', async (req, res) => {
     }
 });
 
+
+// ============================================
+// RUTAS - AUTENTICACIÓN
+// ============================================
+app.post('/api/login', async (req, res) => {
+    try {
+        const { empleadoId, pin } = req.body;
+        
+        if (!empleadoId || !pin) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'ID de empleado y PIN son requeridos' 
+            });
+        }
+
+        const usuarios = await appsheetRequest('Usuarios', 'Find');
+        
+        const usuario = usuarios.find(u => 
+            String(u['ID Empleado']).trim() === String(empleadoId).trim() && 
+            String(u['Pin de Acceso a Sistema']).trim() === String(pin).trim()
+        );
+
+        if (!usuario) {
+            return res.status(401).json({ 
+                success: false, 
+                error: 'Credenciales incorrectas' 
+            });
+        }
+
+        res.json({ 
+            success: true, 
+            usuario: {
+                id: usuario['ID Empleado'],
+                nombre: usuario['Nombre'] || usuario['NOMBRE'] || 'Usuario',
+                sucursal: usuario['Sucursal'] || usuario['SUCURSAL'] || 'Principal',
+                rol: usuario['Rol'] || usuario['ROL'] || 'Vendedor'
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
 // ============================================
 // HEALTH CHECK
 // ============================================
