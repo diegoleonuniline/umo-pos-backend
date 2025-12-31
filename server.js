@@ -11,16 +11,39 @@ const APP_ID = '317b1c5c-33b0-4c4b-b3f6-40c925e05237';
 const ACCESS_KEY = 'V2-htkz3-r0477-0iLrM-Jhq7C-2uehz-liV0b-sVTAT-n23hT';
 const API_BASE = 'https://www.appsheet.com/api/v2/apps';
 
-app.use(cors({
-    origin: [
-        'https://diegoleonuniline.github.io',
-        'http://localhost:3000',
-        'http://127.0.0.1:5500'
-    ],
+// ============================================
+// CORS - CONFIGURACIÓN COMPLETA
+// ============================================
+const corsOptions = {
+    origin: function (origin, callback) {
+        // Permitir requests sin origin (como mobile apps o curl)
+        if (!origin) return callback(null, true);
+        
+        const allowedOrigins = [
+            'https://diegoleonuniline.github.io',
+            'http://localhost:3000',
+            'http://localhost:5500',
+            'http://127.0.0.1:5500',
+            'http://localhost:8080'
+        ];
+        
+        if (allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.github.io')) {
+            callback(null, true);
+        } else {
+            callback(null, true); // Permitir todos por ahora para debug
+        }
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true
-}));
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    credentials: true,
+    optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
+
+// Manejar preflight requests explícitamente
+app.options('*', cors(corsOptions));
+
 app.use(express.json());
 
 // ============================================
@@ -50,10 +73,51 @@ async function appsheetRequest(tabla, action, rows = []) {
 }
 
 // ============================================
+// RUTAS - AUTENTICACIÓN
+// ============================================
+app.post('/api/login', async (req, res) => {
+    try {
+        const { empleadoId, pin } = req.body;
+        
+        if (!empleadoId || !pin) {
+            return res.status(400).json({ 
+                success: false, 
+                error: 'ID de empleado y PIN son requeridos' 
+            });
+        }
+
+        const usuarios = await appsheetRequest('Usuarios', 'Find');
+        
+        const usuario = usuarios.find(u => 
+            String(u['ID Empleado']).trim() === String(empleadoId).trim() && 
+            String(u['Pin de Acceso a Sistema']).trim() === String(pin).trim()
+        );
+
+        if (!usuario) {
+            return res.status(401).json({ 
+                success: false, 
+                error: 'Credenciales incorrectas' 
+            });
+        }
+
+        res.json({ 
+            success: true, 
+            usuario: {
+                id: usuario['ID Empleado'],
+                nombre: usuario['Nombre'] || usuario['NOMBRE'] || 'Usuario',
+                sucursal: usuario['Sucursal'] || usuario['SUCURSAL'] || 'Principal',
+                rol: usuario['Rol'] || usuario['ROL'] || 'Vendedor'
+            }
+        });
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================
 // RUTAS - TURNOS
 // ============================================
-
-// Verificar turno activo
 app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
     try {
         const { usuario, sucursal } = req.params;
@@ -74,7 +138,6 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
     }
 });
 
-// Abrir turno
 app.post('/api/turnos/abrir', async (req, res) => {
     try {
         const { 
@@ -107,26 +170,7 @@ app.post('/api/turnos/abrir', async (req, res) => {
             EUR: parseFloat(eurInicial) || 0,
             'USD a MXN': parseFloat(tasaUSD) || 17.5,
             'CAD a MXN': parseFloat(tasaCAD) || 13,
-            'EUR a MXN': parseFloat(tasaEUR) || 19,
-            'Monedas de $1 MXN': 0,
-            'Monedas de $2 MXN': 0,
-            'Monedas de $5 MXN': 0,
-            'Monedas de $10 MXN': 0,
-            'Monedas de $20 MXN': 0,
-            'Billetes de $20 MXN': 0,
-            'Billetes de $50 MXN': 0,
-            'Billetes de $100 MXN': 0,
-            'Billetes de $200 MXN': 0,
-            'Billetes de $500 MXN': 0,
-            'Billetes de $1000 MXN': 0,
-            '💵 USD': 0,
-            '🍁 CAD': 0,
-            '🇪🇺 EUR': 0,
-            'BBVA Nacional': 0,
-            'BBVA Internacional': 0,
-            'Clip Nacional': 0,
-            'Clip Internacional': 0,
-            'Transferencia electrónica de fondos': 0
+            'EUR a MXN': parseFloat(tasaEUR) || 19
         };
 
         await appsheetRequest('Turnos', 'Add', [turnoData]);
@@ -141,28 +185,22 @@ app.post('/api/turnos/abrir', async (req, res) => {
     }
 });
 
-// Cerrar turno
 app.post('/api/turnos/cerrar', async (req, res) => {
     try {
         const { 
             turnoId,
-            // Conteo MXN
             monedas1, monedas2, monedas5, monedas10, monedas20,
             billetes20, billetes50, billetes100, billetes200, billetes500, billetes1000,
-            // Conteo otras monedas
             conteoUSD, conteoCAD, conteoEUR,
-            // Transferencias
             bbvaNacional, bbvaInternacional,
             clipNacional, clipInternacional,
             transferencia,
-            // Observaciones
             observaciones
         } = req.body;
 
         const ahora = new Date();
         const horaCierre = ahora.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
 
-        // Calcular total MXN
         const totalMXN = 
             (parseFloat(monedas1) || 0) * 1 +
             (parseFloat(monedas2) || 0) * 2 +
@@ -180,31 +218,7 @@ app.post('/api/turnos/cerrar', async (req, res) => {
             ID: turnoId,
             'Hora de Cierre': horaCierre,
             Estado: 'Cerrado',
-            // Monedas MXN
-            'Monedas de $1 MXN': parseFloat(monedas1) || 0,
-            'Monedas de $2 MXN': parseFloat(monedas2) || 0,
-            'Monedas de $5 MXN': parseFloat(monedas5) || 0,
-            'Monedas de $10 MXN': parseFloat(monedas10) || 0,
-            'Monedas de $20 MXN': parseFloat(monedas20) || 0,
-            // Billetes MXN
-            'Billetes de $20 MXN': parseFloat(billetes20) || 0,
-            'Billetes de $50 MXN': parseFloat(billetes50) || 0,
-            'Billetes de $100 MXN': parseFloat(billetes100) || 0,
-            'Billetes de $200 MXN': parseFloat(billetes200) || 0,
-            'Billetes de $500 MXN': parseFloat(billetes500) || 0,
-            'Billetes de $1000 MXN': parseFloat(billetes1000) || 0,
             'Total MXN (Calculado)': totalMXN,
-            // Otras monedas
-            '💵 USD': parseFloat(conteoUSD) || 0,
-            '🍁 CAD': parseFloat(conteoCAD) || 0,
-            '🇪🇺 EUR': parseFloat(conteoEUR) || 0,
-            // Transferencias
-            'BBVA Nacional': parseFloat(bbvaNacional) || 0,
-            'BBVA Internacional': parseFloat(bbvaInternacional) || 0,
-            'Clip Nacional': parseFloat(clipNacional) || 0,
-            'Clip Internacional': parseFloat(clipInternacional) || 0,
-            'Transferencia electrónica de fondos': parseFloat(transferencia) || 0,
-            // Observaciones
             Observaciones: observaciones || ''
         };
 
@@ -299,9 +313,7 @@ app.post('/api/clientes', async (req, res) => {
 app.get('/api/metodos-pago', async (req, res) => {
     try {
         const metodos = await appsheetRequest('Metodos de pago', 'Find');
-        
         const lista = metodos.map(m => m.Nombre || m.NOMBRE || 'Sin nombre');
-
         res.json({ success: true, metodos: lista.length > 0 ? lista : ['Efectivo', 'Tarjeta', 'Transferencia'] });
     } catch (error) {
         res.json({ success: true, metodos: ['Efectivo', 'Tarjeta', 'Transferencia'] });
@@ -324,71 +336,6 @@ app.get('/api/descuentos', async (req, res) => {
         }));
 
         res.json({ success: true, descuentos: descuentosFormateados });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// ============================================
-// RUTAS - VENTAS
-// ============================================
-app.post('/api/ventas', async (req, res) => {
-    try {
-        const { venta, detalles, pagos } = req.body;
-
-        // Registrar venta
-        const ventaData = {
-            IdVenta: venta.IdVenta,
-            Sucursal: venta.Sucursal,
-            Vendedor: venta.Vendedor,
-            Cliente: venta.Cliente,
-            TipoDescuento: venta.TipoDescuento || 'Ninguno',
-            Observaciones: venta.Observaciones || '',
-            'Descuento Extra': parseFloat(venta.DescuentoExtra) || 0,
-            'Agregado por': venta.Vendedor,
-            TurnoId: venta.TurnoId || ''
-        };
-
-        await appsheetRequest('Ventas', 'Add', [ventaData]);
-
-        // Registrar detalles
-        if (detalles && detalles.length > 0) {
-            const detallesData = detalles.map(d => ({
-                ID: d.ID,
-                Ventas: venta.IdVenta,
-                Producto: d.Producto,
-                Cantidad: d.Cantidad,
-                Precio: d.Precio,
-                SubTotal: d.SubTotal,
-                Descuento: d.Descuento,
-                Total: d.Total
-            }));
-            await appsheetRequest('Detalle Venta', 'Add', detallesData);
-        }
-
-        // Registrar pagos
-        if (pagos && pagos.length > 0) {
-            const pagosData = pagos.map(p => ({
-                Id: p.Id,
-                Ventas: venta.IdVenta,
-                Monto: p.Monto,
-                Moneda: p.Moneda,
-                Metodo: p.Metodo,
-                'Tasa de Cambio': p.TasaCambio || 1,
-                SucursaldeRegistro: venta.Sucursal,
-                'Grupo Cliente': venta.GrupoCliente || '',
-                Cliente: venta.Cliente,
-                Vendedor: venta.Vendedor,
-                Estado: 'Cerrado'
-            }));
-            await appsheetRequest('Pagos', 'Add', pagosData);
-        }
-
-        res.json({ 
-            success: true, 
-            ventaId: venta.IdVenta,
-            mensaje: 'Venta registrada exitosamente'
-        });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -425,48 +372,68 @@ app.get('/api/promociones', async (req, res) => {
     }
 });
 
-
 // ============================================
-// RUTAS - AUTENTICACIÓN
+// RUTAS - VENTAS
 // ============================================
-app.post('/api/login', async (req, res) => {
+app.post('/api/ventas', async (req, res) => {
     try {
-        const { empleadoId, pin } = req.body;
-        
-        if (!empleadoId || !pin) {
-            return res.status(400).json({ 
-                success: false, 
-                error: 'ID de empleado y PIN son requeridos' 
-            });
+        const { venta, detalles, pagos } = req.body;
+
+        const ventaData = {
+            IdVenta: venta.IdVenta,
+            Sucursal: venta.Sucursal,
+            Vendedor: venta.Vendedor,
+            Cliente: venta.Cliente,
+            TipoDescuento: venta.TipoDescuento || 'Ninguno',
+            Observaciones: venta.Observaciones || '',
+            'Descuento Extra': parseFloat(venta.DescuentoExtra) || 0,
+            'Agregado por': venta.Vendedor,
+            TurnoId: venta.TurnoId || ''
+        };
+
+        await appsheetRequest('Ventas', 'Add', [ventaData]);
+
+        if (detalles && detalles.length > 0) {
+            const detallesData = detalles.map(d => ({
+                ID: d.ID,
+                Ventas: venta.IdVenta,
+                Producto: d.Producto,
+                Cantidad: d.Cantidad,
+                Precio: d.Precio,
+                SubTotal: d.SubTotal,
+                Descuento: d.Descuento,
+                Total: d.Total
+            }));
+            await appsheetRequest('Detalle Venta', 'Add', detallesData);
         }
 
-        const usuarios = await appsheetRequest('Usuarios', 'Find');
-        
-        const usuario = usuarios.find(u => 
-            String(u['ID Empleado']).trim() === String(empleadoId).trim() && 
-            String(u['Pin de Acceso a Sistema']).trim() === String(pin).trim()
-        );
-
-        if (!usuario) {
-            return res.status(401).json({ 
-                success: false, 
-                error: 'Credenciales incorrectas' 
-            });
+        if (pagos && pagos.length > 0) {
+            const pagosData = pagos.map(p => ({
+                Id: p.Id,
+                Ventas: venta.IdVenta,
+                Monto: p.Monto,
+                Moneda: p.Moneda,
+                Metodo: p.Metodo,
+                'Tasa de Cambio': p['Tasa de Cambio'] || 1,
+                SucursaldeRegistro: venta.Sucursal,
+                'Grupo Cliente': venta.GrupoCliente || '',
+                Cliente: venta.Cliente,
+                Vendedor: venta.Vendedor,
+                Estado: 'Cerrado'
+            }));
+            await appsheetRequest('Pagos', 'Add', pagosData);
         }
 
         res.json({ 
             success: true, 
-            usuario: {
-                id: usuario['ID Empleado'],
-                nombre: usuario['Nombre'] || usuario['NOMBRE'] || 'Usuario',
-                sucursal: usuario['Sucursal'] || usuario['SUCURSAL'] || 'Principal',
-                rol: usuario['Rol'] || usuario['ROL'] || 'Vendedor'
-            }
+            ventaId: venta.IdVenta,
+            mensaje: 'Venta registrada exitosamente'
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
 // ============================================
 // HEALTH CHECK
 // ============================================
@@ -474,7 +441,8 @@ app.get('/', (req, res) => {
     res.json({ 
         status: 'OK', 
         servicio: 'UMO POS API',
-        version: '1.0.0'
+        version: '1.0.0',
+        cors: 'enabled'
     });
 });
 
