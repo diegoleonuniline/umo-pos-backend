@@ -19,7 +19,10 @@ const CACHE = {
     usuarios: { data: null, timestamp: null },
     metodosPago: { data: null, timestamp: null },
     descuentos: { data: null, timestamp: null },
-    promociones: { data: null, timestamp: null }
+    promociones: { data: null, timestamp: null },
+    categorias: { data: null, timestamp: null },
+    conceptos: { data: null, timestamp: null },
+    bancos: { data: null, timestamp: null }
 };
 
 function getCacheStatus() {
@@ -207,6 +210,37 @@ async function cargarPromociones() {
     return CACHE.promociones.data;
 }
 
+async function cargarCategorias() {
+    const categorias = await appsheetRequest('Categoria', 'Find');
+    CACHE.categorias.data = (Array.isArray(categorias) ? categorias : []).map(c => ({
+        id: c.ID || c.Id || '',
+        nombre: c.Categoria || ''
+    }));
+    CACHE.categorias.timestamp = new Date().toISOString();
+    return CACHE.categorias.data;
+}
+
+async function cargarConceptos() {
+    const conceptos = await appsheetRequest('Concepto', 'Find');
+    CACHE.conceptos.data = (Array.isArray(conceptos) ? conceptos : []).map(c => ({
+        id: c.ID || c.Id || '',
+        nombre: c.Concepto || '',
+        categoria: c.Categoria || ''
+    }));
+    CACHE.conceptos.timestamp = new Date().toISOString();
+    return CACHE.conceptos.data;
+}
+
+async function cargarBancos() {
+    const bancos = await appsheetRequest('Bancos', 'Find');
+    CACHE.bancos.data = (Array.isArray(bancos) ? bancos : []).map(b => ({
+        id: b.Id || b.ID || '',
+        nombre: b.Banco || ''
+    }));
+    CACHE.bancos.timestamp = new Date().toISOString();
+    return CACHE.bancos.data;
+}
+
 // ============================================
 // SINCRONIZACIÓN COMPLETA
 // ============================================
@@ -220,7 +254,10 @@ async function sincronizarTodo() {
         cargarUsuarios(),
         cargarMetodosPago(),
         cargarDescuentos(),
-        cargarPromociones()
+        cargarPromociones(),
+        cargarCategorias(),
+        cargarConceptos(),
+        cargarBancos()
     ]);
     
     const tiempo = Date.now() - inicio;
@@ -787,6 +824,116 @@ app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
         });
     } catch (error) {
         console.error('Error cancelar item:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================
+// CATEGORIAS (CACHÉ)
+// ============================================
+app.get('/api/categorias', async (req, res) => {
+    try {
+        if (!CACHE.categorias.data) await cargarCategorias();
+        res.json({ success: true, categorias: CACHE.categorias.data, fromCache: true });
+    } catch (error) {
+        console.error('Error categorias:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================
+// CONCEPTOS (CACHÉ)
+// ============================================
+app.get('/api/conceptos', async (req, res) => {
+    try {
+        if (!CACHE.conceptos.data) await cargarConceptos();
+        const { categoria } = req.query;
+        let conceptos = CACHE.conceptos.data;
+        if (categoria) {
+            conceptos = conceptos.filter(c => c.categoria.toLowerCase() === categoria.toLowerCase());
+        }
+        res.json({ success: true, conceptos, fromCache: true });
+    } catch (error) {
+        console.error('Error conceptos:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================
+// BANCOS (CACHÉ)
+// ============================================
+app.get('/api/bancos', async (req, res) => {
+    try {
+        if (!CACHE.bancos.data) await cargarBancos();
+        res.json({ success: true, bancos: CACHE.bancos.data, fromCache: true });
+    } catch (error) {
+        console.error('Error bancos:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ============================================
+// MOVIMIENTOS DE CAJA
+// ============================================
+app.post('/api/movimientos-caja', async (req, res) => {
+    try {
+        const { tipo, monto, origen, destino, notas, sucursal, categoria, concepto, usuario } = req.body;
+
+        if (!tipo || !monto) {
+            return res.status(400).json({ success: false, error: 'Tipo y monto requeridos' });
+        }
+
+        const ahora = new Date();
+        const movimientoData = {
+            'Tipo de Movimiento': tipo,
+            'Fecha Movimiento': formatearFechaAppSheet(ahora),
+            Usuario: usuario || '',
+            Monto: parseFloat(monto) || 0,
+            Origen: origen || '',
+            Destino: destino || '',
+            Notas: notas || '',
+            Sucursal: sucursal || '',
+            Categoria: categoria || '',
+            Concepto: concepto || ''
+        };
+
+        const result = await appsheetRequest('Movimientos de Caja', 'Add', [movimientoData]);
+
+        res.json({ success: true, mensaje: `${tipo} registrado exitosamente` });
+    } catch (error) {
+        console.error('Error movimiento caja:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/movimientos-caja/turno/:turnoId', async (req, res) => {
+    try {
+        const { turnoId } = req.params;
+        const { sucursal, fecha } = req.query;
+        
+        let selector = `Filter(Movimientos de Caja, [Sucursal] = "${sucursal}")`;
+        if (fecha) {
+            selector = `Filter(Movimientos de Caja, AND([Sucursal] = "${sucursal}", [Fecha Movimiento] = "${fecha}"))`;
+        }
+        
+        const movimientos = await appsheetRequest('Movimientos de Caja', 'Find', [], selector);
+        
+        const lista = (Array.isArray(movimientos) ? movimientos : []).map(m => ({
+            id: m.ID,
+            tipo: m['Tipo de Movimiento'] || '',
+            fecha: m['Fecha Movimiento'] || '',
+            monto: parseFloat(m.Monto) || 0,
+            origen: m.Origen || '',
+            destino: m.Destino || '',
+            categoria: m.Categoria || '',
+            concepto: m.Concepto || '',
+            notas: m.Notas || '',
+            usuario: m.Usuario || ''
+        }));
+
+        res.json({ success: true, movimientos: lista });
+    } catch (error) {
+        console.error('Error movimientos:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
