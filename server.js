@@ -35,32 +35,15 @@ function getCacheStatus() {
 }
 
 // ============================================
-// CORS - CONFIGURACIÓN
+// CORS
 // ============================================
-const corsOptions = {
-    origin: function (origin, callback) {
-        if (!origin) return callback(null, true);
-        const allowedOrigins = [
-            'https://diegoleonuniline.github.io',
-            'http://localhost:3000',
-            'http://localhost:5500',
-            'http://127.0.0.1:5500',
-            'http://localhost:8080'
-        ];
-        if (allowedOrigins.indexOf(origin) !== -1 || origin.endsWith('.github.io')) {
-            callback(null, true);
-        } else {
-            callback(null, true);
-        }
-    },
+app.use(cors({
+    origin: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    credentials: true,
-    optionsSuccessStatus: 200
-};
-
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+    credentials: true
+}));
+app.options('*', cors());
 app.use(express.json());
 
 // ============================================
@@ -228,26 +211,21 @@ async function cargarPromociones() {
 // SINCRONIZACIÓN COMPLETA
 // ============================================
 async function sincronizarTodo() {
-    console.log('🔄 Iniciando sincronización completa...');
+    console.log('🔄 Sincronizando...');
     const inicio = Date.now();
     
-    try {
-        await Promise.all([
-            cargarProductos(),
-            cargarClientes(),
-            cargarUsuarios(),
-            cargarMetodosPago(),
-            cargarDescuentos(),
-            cargarPromociones()
-        ]);
-        
-        const tiempo = Date.now() - inicio;
-        console.log(`✅ Sincronización completa en ${tiempo}ms`);
-        return { success: true, tiempo, cache: getCacheStatus() };
-    } catch (error) {
-        console.error('❌ Error en sincronización:', error);
-        throw error;
-    }
+    await Promise.all([
+        cargarProductos(),
+        cargarClientes(),
+        cargarUsuarios(),
+        cargarMetodosPago(),
+        cargarDescuentos(),
+        cargarPromociones()
+    ]);
+    
+    const tiempo = Date.now() - inicio;
+    console.log(`✅ Sync completo en ${tiempo}ms`);
+    return { success: true, tiempo, cache: getCacheStatus() };
 }
 
 // ============================================
@@ -267,20 +245,17 @@ app.get('/api/sync/status', (req, res) => {
 });
 
 // ============================================
-// RUTAS - AUTENTICACIÓN (USA CACHÉ)
+// LOGIN
 // ============================================
 app.post('/api/login', async (req, res) => {
     try {
         const { empleadoId, pin } = req.body;
         
         if (!empleadoId || !pin) {
-            return res.status(400).json({ success: false, error: 'ID de empleado y PIN son requeridos' });
+            return res.status(400).json({ success: false, error: 'ID y PIN requeridos' });
         }
 
-        // Usar caché si existe, sino cargar
-        if (!CACHE.usuarios.data) {
-            await cargarUsuarios();
-        }
+        if (!CACHE.usuarios.data) await cargarUsuarios();
         
         const usuario = CACHE.usuarios.data.find(u => 
             String(u['ID Empleado']).trim() === String(empleadoId).trim() && 
@@ -295,10 +270,10 @@ app.post('/api/login', async (req, res) => {
             success: true, 
             usuario: {
                 id: usuario['ID Empleado'],
-                nombre: usuario['Nombre'] || usuario['NOMBRE'] || 'Usuario',
-                nombreCompleto: usuario['Nombre Completo'] || `${usuario['Nombre']} ${usuario['Apellido Paterno']} ${usuario['Apellido Materno']}`.trim(),
-                sucursal: usuario['Sucursal'] || usuario['SUCURSAL'] || 'Principal',
-                rol: usuario['Puesto'] || usuario['Rol'] || 'Vendedor'
+                nombre: usuario['Nombre'] || 'Usuario',
+                nombreCompleto: usuario['Nombre Completo'] || `${usuario['Nombre'] || ''} ${usuario['Apellido Paterno'] || ''} ${usuario['Apellido Materno'] || ''}`.trim(),
+                sucursal: usuario['Sucursal'] || 'Principal',
+                rol: usuario['Puesto'] || 'Vendedor'
             }
         });
     } catch (error) {
@@ -308,16 +283,13 @@ app.post('/api/login', async (req, res) => {
 });
 
 // ============================================
-// RUTAS - TURNOS
+// TURNOS
 // ============================================
 app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
     try {
         const { usuario, sucursal } = req.params;
         
-        // Usuarios desde caché
-        if (!CACHE.usuarios.data) {
-            await cargarUsuarios();
-        }
+        if (!CACHE.usuarios.data) await cargarUsuarios();
         
         let nombreUsuario = null;
         const usuarioEncontrado = CACHE.usuarios.data.find(u => 
@@ -327,7 +299,6 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
             nombreUsuario = usuarioEncontrado['Nombre'];
         }
         
-        // Turnos siempre en tiempo real (cambian constantemente)
         const turnos = await appsheetRequest('AbrirTurno', 'Find', [], `Filter(AbrirTurno, AND([Estado] = "Abierto", [Sucursal] = "${sucursal}"))`);
         
         if (!Array.isArray(turnos) || turnos.length === 0) {
@@ -343,7 +314,7 @@ app.get('/api/turnos/activo/:usuario/:sucursal', async (req, res) => {
 
         res.json({ success: true, turnoActivo: turnoActivo || null });
     } catch (error) {
-        console.error('Error verificando turno:', error);
+        console.error('Error turno:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -376,7 +347,7 @@ app.post('/api/turnos/abrir', async (req, res) => {
             turnoId = result.Rows[0].ID;
         }
 
-        res.json({ success: true, turnoId, mensaje: 'Turno abierto exitosamente' });
+        res.json({ success: true, turnoId, mensaje: 'Turno abierto' });
     } catch (error) {
         console.error('Error abriendo turno:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -421,7 +392,7 @@ app.post('/api/turnos/cerrar', async (req, res) => {
         };
 
         await appsheetRequest('AbrirTurno', 'Edit', [updateData]);
-        res.json({ success: true, totalMXN, mensaje: 'Turno cerrado exitosamente' });
+        res.json({ success: true, totalMXN, mensaje: 'Turno cerrado' });
     } catch (error) {
         console.error('Error cerrando turno:', error);
         res.status(500).json({ success: false, error: error.message });
@@ -429,38 +400,34 @@ app.post('/api/turnos/cerrar', async (req, res) => {
 });
 
 // ============================================
-// RUTAS - PRODUCTOS (DESDE CACHÉ)
+// PRODUCTOS (CACHÉ)
 // ============================================
 app.get('/api/productos', async (req, res) => {
     try {
-        if (!CACHE.productos.data) {
-            await cargarProductos();
-        }
+        if (!CACHE.productos.data) await cargarProductos();
         res.json({ success: true, productos: CACHE.productos.data, fromCache: true, timestamp: CACHE.productos.timestamp });
     } catch (error) {
-        console.error('Error obteniendo productos:', error);
+        console.error('Error productos:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // ============================================
-// RUTAS - CLIENTES (DESDE CACHÉ)
+// CLIENTES (CACHÉ)
 // ============================================
 app.get('/api/clientes', async (req, res) => {
     try {
-        if (!CACHE.clientes.data) {
-            await cargarClientes();
-        }
+        if (!CACHE.clientes.data) await cargarClientes();
         res.json({ success: true, clientes: CACHE.clientes.data, fromCache: true, timestamp: CACHE.clientes.timestamp });
     } catch (error) {
-        console.error('Error obteniendo clientes:', error);
+        console.error('Error clientes:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 app.post('/api/clientes', async (req, res) => {
     try {
-        const { codigo, nombre, correo, telefono } = req.body;
+        const { codigo, nombre, correo, telefono, grupo } = req.body;
         
         if (!nombre) {
             return res.status(400).json({ success: false, error: 'Nombre requerido' });
@@ -470,37 +437,35 @@ app.post('/api/clientes', async (req, res) => {
             Codigo: codigo || `CLI-${Date.now()}`,
             Nombre: nombre,
             Correo: correo || '',
-            Telefono: telefono || ''
+            Telefono: telefono || '',
+            Grupo: grupo || ''
         };
 
         await appsheetRequest('Clientes', 'Add', [clienteData]);
         
-        // Agregar al caché local
         if (CACHE.clientes.data) {
             CACHE.clientes.data.push({
                 codigo: clienteData.Codigo,
                 nombre: clienteData.Nombre,
                 correo: clienteData.Correo,
                 telefono: clienteData.Telefono,
-                grupo: ''
+                grupo: clienteData.Grupo
             });
         }
         
         res.json({ success: true, codigo: clienteData.Codigo });
     } catch (error) {
-        console.error('Error agregando cliente:', error);
+        console.error('Error cliente:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // ============================================
-// RUTAS - MÉTODOS DE PAGO (DESDE CACHÉ)
+// MÉTODOS DE PAGO (CACHÉ)
 // ============================================
 app.get('/api/metodos-pago', async (req, res) => {
     try {
-        if (!CACHE.metodosPago.data) {
-            await cargarMetodosPago();
-        }
+        if (!CACHE.metodosPago.data) await cargarMetodosPago();
         res.json({ success: true, metodos: CACHE.metodosPago.data, fromCache: true });
     } catch (error) {
         res.json({ success: true, metodos: ['Efectivo', 'Tarjeta', 'Transferencia'] });
@@ -508,16 +473,14 @@ app.get('/api/metodos-pago', async (req, res) => {
 });
 
 // ============================================
-// RUTAS - DESCUENTOS (DESDE CACHÉ)
+// DESCUENTOS (CACHÉ)
 // ============================================
 app.get('/api/descuentos', async (req, res) => {
     try {
-        if (!CACHE.descuentos.data) {
-            await cargarDescuentos();
-        }
+        if (!CACHE.descuentos.data) await cargarDescuentos();
         res.json({ success: true, descuentos: CACHE.descuentos.data, fromCache: true });
     } catch (error) {
-        console.error('Error obteniendo descuentos:', error);
+        console.error('Error descuentos:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -526,9 +489,7 @@ app.post('/api/descuentos/calcular', async (req, res) => {
     try {
         const { grupoCliente, metodoPago } = req.body;
         
-        if (!CACHE.descuentos.data) {
-            await cargarDescuentos();
-        }
+        if (!CACHE.descuentos.data) await cargarDescuentos();
         
         if (!CACHE.descuentos.data || CACHE.descuentos.data.length === 0) {
             return res.json({ success: true, porcentaje: 0, descripcion: 'Sin descuento', id: null });
@@ -560,28 +521,26 @@ app.post('/api/descuentos/calcular', async (req, res) => {
         
         res.json({ success: true, porcentaje: 0, descripcion: 'Sin descuento', id: null });
     } catch (error) {
-        console.error('Error calculando descuento:', error);
+        console.error('Error descuento:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // ============================================
-// RUTAS - PROMOCIONES (DESDE CACHÉ)
+// PROMOCIONES (CACHÉ)
 // ============================================
 app.get('/api/promociones', async (req, res) => {
     try {
-        if (!CACHE.promociones.data) {
-            await cargarPromociones();
-        }
+        if (!CACHE.promociones.data) await cargarPromociones();
         res.json({ success: true, promociones: CACHE.promociones.data, fromCache: true });
     } catch (error) {
-        console.error('Error obteniendo promociones:', error);
+        console.error('Error promociones:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // ============================================
-// RUTAS - VENTAS
+// REGISTRAR VENTA
 // ============================================
 app.post('/api/ventas', async (req, res) => {
     try {
@@ -589,13 +548,13 @@ app.post('/api/ventas', async (req, res) => {
 
         const ventaData = {
             IdVenta: venta.IdVenta,
-            Sucursal: venta.Sucursal,
-            Vendedor: venta.Vendedor,
-            Cliente: venta.Cliente,
+            Sucursal: venta.Sucursal || '',
+            Vendedor: venta.Vendedor || '',
+            Cliente: venta.Cliente || 'Público General',
             TipoDescuento: venta.TipoDescuento || 'Ninguno',
             Observaciones: venta.Observaciones || '',
             'Descuento Extra': parseFloat(venta.DescuentoExtra) || 0,
-            'Agregado por': venta.Vendedor,
+            'Agregado por': venta.Vendedor || '',
             TurnoId: venta.TurnoId || '',
             'Estado Venta': 'Cerrada'
         };
@@ -619,10 +578,10 @@ app.post('/api/ventas', async (req, res) => {
             Moneda: p.Moneda,
             Metodo: p.Metodo,
             'Tasa de Cambio': p['Tasa de Cambio'] || 1,
-            SucursaldeRegistro: venta.Sucursal,
+            SucursaldeRegistro: venta.Sucursal || '',
             'Grupo Cliente': venta.GrupoCliente || '',
-            Cliente: venta.Cliente,
-            Vendedor: venta.Vendedor,
+            Cliente: venta.Cliente || 'Público General',
+            Vendedor: venta.Vendedor || '',
             Estado: 'Activo'
         }));
 
@@ -632,9 +591,9 @@ app.post('/api/ventas', async (req, res) => {
             pagosData.length > 0 ? appsheetRequest('Pagos', 'Add', pagosData) : Promise.resolve()
         ]);
 
-        res.json({ success: true, ventaId: venta.IdVenta, mensaje: 'Venta registrada exitosamente' });
+        res.json({ success: true, ventaId: venta.IdVenta, mensaje: 'Venta registrada' });
     } catch (error) {
-        console.error('Error registrando venta:', error);
+        console.error('Error venta:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -654,6 +613,7 @@ app.get('/api/ventas/turno/:turnoId', async (req, res) => {
                 hora: v.Hora || v['Hora de Venta'] || '',
                 cliente: v.Cliente || 'Público General',
                 vendedor: v.Vendedor || '',
+                sucursal: v.Sucursal || '',
                 total: parseFloat(v.Total || v['Total Venta'] || 0),
                 estado: v['Estado Venta'] || 'Completada',
                 descuento: v.TipoDescuento || ''
@@ -662,13 +622,13 @@ app.get('/api/ventas/turno/:turnoId', async (req, res) => {
 
         res.json({ success: true, ventas: ventasTurno });
     } catch (error) {
-        console.error('Error obteniendo ventas del turno:', error);
+        console.error('Error ventas turno:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // ============================================
-// DETALLE VENTA
+// DETALLE DE VENTA
 // ============================================
 app.get('/api/ventas/:idVenta/detalle', async (req, res) => {
     try {
@@ -711,7 +671,7 @@ app.get('/api/ventas/:idVenta/detalle', async (req, res) => {
             venta: {
                 idVenta: venta.IdVenta || venta.ID,
                 fecha: venta.Fecha || '',
-                hora: venta.Hora || '',
+                hora: venta.Hora || venta['Hora de Venta'] || '',
                 cliente: venta.Cliente || 'Público General',
                 vendedor: venta.Vendedor || '',
                 sucursal: venta.Sucursal || '',
@@ -723,13 +683,13 @@ app.get('/api/ventas/:idVenta/detalle', async (req, res) => {
             pagos
         });
     } catch (error) {
-        console.error('Error obteniendo detalle de venta:', error);
+        console.error('Error detalle venta:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // ============================================
-// CANCELAR VENTA
+// CANCELAR VENTA COMPLETA
 // ============================================
 app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
     try {
@@ -773,18 +733,18 @@ app.post('/api/ventas/:idVenta/cancelar', async (req, res) => {
 
         res.json({ 
             success: true, 
-            mensaje: 'Venta cancelada exitosamente',
+            mensaje: 'Venta cancelada',
             itemsCancelados: itemsVenta.length,
             pagosCancelados: pagosVenta.length
         });
     } catch (error) {
-        console.error('Error cancelando venta:', error);
+        console.error('Error cancelar:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // ============================================
-// CANCELAR ITEM
+// CANCELAR ITEM INDIVIDUAL
 // ============================================
 app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
     try {
@@ -820,12 +780,12 @@ app.post('/api/ventas/:idVenta/cancelar-item', async (req, res) => {
 
         res.json({ 
             success: true, 
-            mensaje: 'Item cancelado exitosamente',
+            mensaje: 'Item cancelado',
             itemCancelado: item.Producto,
             nuevoTotal
         });
     } catch (error) {
-        console.error('Error cancelando item:', error);
+        console.error('Error cancelar item:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -837,7 +797,7 @@ app.get('/', (req, res) => {
     res.json({ 
         status: 'OK', 
         servicio: 'UMO POS API', 
-        version: '1.2.0', 
+        version: '1.3.0', 
         cors: 'enabled',
         cache: getCacheStatus()
     });
@@ -848,16 +808,15 @@ app.get('/health', (req, res) => {
 });
 
 // ============================================
-// INICIAR SERVIDOR + CARGAR CACHÉ INICIAL
+// INICIAR SERVIDOR
 // ============================================
 app.listen(PORT, async () => {
-    console.log(`🚀 UMO POS API corriendo en puerto ${PORT}`);
+    console.log(`🚀 UMO POS API v1.3.0 - Puerto ${PORT}`);
     
-    // Cargar caché al iniciar
     try {
         await sincronizarTodo();
-        console.log('✅ Caché inicial cargado');
+        console.log('✅ Caché cargado');
     } catch (error) {
-        console.error('⚠️ Error cargando caché inicial:', error.message);
+        console.error('⚠️ Error caché inicial:', error.message);
     }
 });
