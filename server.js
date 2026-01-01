@@ -568,7 +568,8 @@ app.post('/api/ventas', async (req, res) => {
             SubTotal: d.SubTotal,
             Descuento: d.Descuento,
             Total: d.Total,
-            Status: 'Activo'
+            Status: 'Activo',
+            SucursaldeRegistro: venta.Sucursal || ''
         }));
 
         const pagosData = (pagos || []).map(p => ({
