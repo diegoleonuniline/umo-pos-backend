@@ -365,7 +365,6 @@ app.post('/api/turnos/abrir', async (req, res) => {
             Fecha: formatearFechaAppSheet(ahora),
             'Hora Apertura': formatearHoraAppSheet(ahora),
             Usuario: usuario,
-            'ID Empleado': empleadoId || '',
             Sucursal: sucursal,
             Estado: 'Abierto',
             Efectivo: parseFloat(efectivoInicial) || 0,
