@@ -968,3 +968,441 @@ app.listen(PORT, async () => {
         console.error('⚠️ Error caché inicial:', error.message);
     }
 });
+// ============================================
+// CORTE DE TURNO - Agregar a server.js
+// ============================================
+
+// OBTENER DATOS PARA CORTE (sin cerrar)
+app.get('/api/turnos/:turnoId/corte', async (req, res) => {
+    try {
+        const { turnoId } = req.params;
+        const { sucursal, usuario, fecha } = req.query;
+
+        // 1. Obtener turno
+        const turnos = await appsheetRequest('AbrirTurno', 'Find', [], `Filter(AbrirTurno, [ID] = "${turnoId}")`);
+        const turno = Array.isArray(turnos) && turnos.length > 0 ? turnos[0] : null;
+        
+        if (!turno) {
+            return res.status(404).json({ success: false, error: 'Turno no encontrado' });
+        }
+
+        // Datos iniciales del turno
+        const efectivoInicial = parseFloat(turno.Efectivo) || 0;
+        const usdInicial = parseFloat(turno.USD) || 0;
+        const cadInicial = parseFloat(turno.CAD) || 0;
+        const eurInicial = parseFloat(turno.EUR) || 0;
+        const tasaUSD = parseFloat(turno['USD a MXN']) || 17.5;
+        const tasaCAD = parseFloat(turno['CAD a MXN']) || 13;
+        const tasaEUR = parseFloat(turno['EUR a MXN']) || 19;
+
+        // 2. Obtener ventas del turno
+        const ventas = await appsheetRequest('Ventas', 'Find', [], `Filter(Ventas, [TurnoId] = "${turnoId}")`);
+        const listaVentas = Array.isArray(ventas) ? ventas : [];
+
+        // 3. Obtener IDs de ventas para buscar pagos
+        const idsVentas = listaVentas.map(v => v.IdVenta);
+
+        // 4. Obtener pagos de esas ventas
+        let pagos = [];
+        if (idsVentas.length > 0) {
+            const allPagos = await appsheetRequest('Pagos', 'Find');
+            pagos = (Array.isArray(allPagos) ? allPagos : [])
+                .filter(p => idsVentas.includes(p.Ventas));
+        }
+
+        // 5. Obtener movimientos de caja del día/sucursal
+        const fechaTurno = turno.Fecha || fecha;
+        const sucursalTurno = turno.Sucursal || sucursal;
+        const movimientos = await appsheetRequest('Movimientos de Caja', 'Find', [], 
+            `Filter(Movimientos de Caja, AND([Sucursal] = "${sucursalTurno}", [Fecha Movimiento] = "${fechaTurno}"))`);
+        const listaMovimientos = Array.isArray(movimientos) ? movimientos : [];
+
+        // ============================================
+        // CALCULAR VENTAS
+        // ============================================
+        let ventasBrutas = 0;
+        let cancelaciones = 0;
+        let ventasCerradas = 0;
+        let ventasAbiertas = 0;
+        let numVentas = 0;
+        let numCanceladas = 0;
+
+        listaVentas.forEach(v => {
+            const total = parseFloat(v.Total) || 0;
+            const estado = (v['Estado Venta'] || '').toLowerCase();
+
+            if (estado === 'cancelada') {
+                cancelaciones += total;
+                numCanceladas++;
+            } else {
+                ventasBrutas += total;
+                numVentas++;
+                if (estado === 'cerrada') ventasCerradas += total;
+                if (estado === 'abierta') ventasAbiertas += total;
+            }
+        });
+
+        const ventasNetas = ventasBrutas;
+
+        // ============================================
+        // CALCULAR PAGOS POR MÉTODO Y MONEDA
+        // ============================================
+        const pagosPorMetodo = {
+            efectivoMXN: 0,
+            efectivoUSD: 0,
+            efectivoCAD: 0,
+            efectivoEUR: 0,
+            bbvaNacional: 0,
+            bbvaInternacional: 0,
+            clipNacional: 0,
+            clipInternacional: 0,
+            transferencia: 0,
+            otrosTarjeta: 0
+        };
+
+        let totalPagadoMXN = 0;
+        let descuentosAplicados = 0;
+
+        pagos.forEach(p => {
+            const estado = (p.Estado || '').toLowerCase();
+            if (estado === 'cancelado') return; // Ignorar pagos cancelados
+
+            const monto = parseFloat(p.Monto) || 0;
+            const moneda = (p.Moneda || 'MXN').toUpperCase();
+            const metodo = (p.Metodo || '').toLowerCase();
+            const tasa = parseFloat(p['Tasa de Cambio']) || 1;
+
+            // Convertir a MXN
+            let montoMXN = monto;
+            if (moneda === 'USD') montoMXN = monto * tasa;
+            else if (moneda === 'CAD') montoMXN = monto * tasa;
+            else if (moneda === 'EUR') montoMXN = monto * tasa;
+
+            totalPagadoMXN += montoMXN;
+
+            // Clasificar por método
+            if (metodo.includes('efectivo')) {
+                if (moneda === 'MXN') pagosPorMetodo.efectivoMXN += monto;
+                else if (moneda === 'USD') pagosPorMetodo.efectivoUSD += monto;
+                else if (moneda === 'CAD') pagosPorMetodo.efectivoCAD += monto;
+                else if (moneda === 'EUR') pagosPorMetodo.efectivoEUR += monto;
+            } else if (metodo.includes('bbva') && metodo.includes('nacional')) {
+                pagosPorMetodo.bbvaNacional += montoMXN;
+            } else if (metodo.includes('bbva') && metodo.includes('internacional')) {
+                pagosPorMetodo.bbvaInternacional += montoMXN;
+            } else if (metodo.includes('clip') && metodo.includes('nacional')) {
+                pagosPorMetodo.clipNacional += montoMXN;
+            } else if (metodo.includes('clip') && metodo.includes('internacional')) {
+                pagosPorMetodo.clipInternacional += montoMXN;
+            } else if (metodo.includes('transferencia')) {
+                pagosPorMetodo.transferencia += montoMXN;
+            } else {
+                pagosPorMetodo.otrosTarjeta += montoMXN;
+            }
+        });
+
+        // Calcular descuentos desde detalle de venta
+        if (idsVentas.length > 0) {
+            const allDetalles = await appsheetRequest('Detalle Venta', 'Find');
+            const detallesTurno = (Array.isArray(allDetalles) ? allDetalles : [])
+                .filter(d => idsVentas.includes(d.Ventas) && (d.Status || '').toLowerCase() !== 'cancelado');
+            
+            detallesTurno.forEach(d => {
+                descuentosAplicados += parseFloat(d.Descuento) || 0;
+            });
+        }
+
+        // ============================================
+        // CALCULAR MOVIMIENTOS DE CAJA
+        // ============================================
+        let entradas = 0;
+        let salidas = 0;
+        let gastos = 0;
+
+        const detalleMovimientos = [];
+
+        listaMovimientos.forEach(m => {
+            const tipo = (m['Tipo de Movimiento'] || '').toLowerCase();
+            const monto = parseFloat(m.Monto) || 0;
+
+            detalleMovimientos.push({
+                id: m.ID,
+                tipo: m['Tipo de Movimiento'],
+                monto,
+                categoria: m.Categoria || '',
+                concepto: m.Concepto || '',
+                notas: m.Notas || ''
+            });
+
+            if (tipo.includes('ingreso') || tipo.includes('entrada')) {
+                entradas += monto;
+            } else if (tipo.includes('retiro') || tipo.includes('salida')) {
+                salidas += monto;
+            } else if (tipo.includes('gasto')) {
+                gastos += monto;
+            }
+        });
+
+        // ============================================
+        // CONCILIACIÓN DE EFECTIVO
+        // ============================================
+        const efectivoVentas = pagosPorMetodo.efectivoMXN;
+        const efectivoEsperado = efectivoInicial + efectivoVentas + entradas - salidas - gastos;
+        const usdEsperado = usdInicial + pagosPorMetodo.efectivoUSD;
+        const cadEsperado = cadInicial + pagosPorMetodo.efectivoCAD;
+        const eurEsperado = eurInicial + pagosPorMetodo.efectivoEUR;
+
+        // ============================================
+        // RESPUESTA
+        // ============================================
+        res.json({
+            success: true,
+            turno: {
+                id: turnoId,
+                fecha: turno.Fecha,
+                horaApertura: turno['Hora Apertura'],
+                usuario: turno.Usuario,
+                sucursal: turno.Sucursal,
+                estado: turno.Estado
+            },
+            inicioCaja: {
+                efectivo: efectivoInicial,
+                usd: usdInicial,
+                cad: cadInicial,
+                eur: eurInicial,
+                tasaUSD,
+                tasaCAD,
+                tasaEUR
+            },
+            ventas: {
+                brutas: ventasBrutas,
+                descuentos: descuentosAplicados,
+                cancelaciones,
+                netas: ventasNetas,
+                numVentas,
+                numCanceladas,
+                ticketPromedio: numVentas > 0 ? ventasNetas / numVentas : 0
+            },
+            pagos: {
+                efectivoMXN: pagosPorMetodo.efectivoMXN,
+                efectivoUSD: pagosPorMetodo.efectivoUSD,
+                efectivoCAD: pagosPorMetodo.efectivoCAD,
+                efectivoEUR: pagosPorMetodo.efectivoEUR,
+                bbvaNacional: pagosPorMetodo.bbvaNacional,
+                bbvaInternacional: pagosPorMetodo.bbvaInternacional,
+                clipNacional: pagosPorMetodo.clipNacional,
+                clipInternacional: pagosPorMetodo.clipInternacional,
+                transferencia: pagosPorMetodo.transferencia,
+                otros: pagosPorMetodo.otrosTarjeta,
+                totalMXN: totalPagadoMXN
+            },
+            movimientos: {
+                entradas,
+                salidas,
+                gastos,
+                neto: entradas - salidas - gastos,
+                detalle: detalleMovimientos
+            },
+            esperado: {
+                efectivoMXN: efectivoEsperado,
+                usd: usdEsperado,
+                cad: cadEsperado,
+                eur: eurEsperado
+            },
+            detalleVentas: listaVentas.map(v => ({
+                id: v.IdVenta,
+                cliente: v.Cliente,
+                total: parseFloat(v.Total) || 0,
+                estado: v['Estado Venta'],
+                descuento: v.TipoDescuento
+            }))
+        });
+
+    } catch (error) {
+        console.error('Error corte:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// GUARDAR CORTE Y CERRAR TURNO
+app.post('/api/turnos/:turnoId/cerrar-corte', async (req, res) => {
+    try {
+        const { turnoId } = req.params;
+        const { 
+            // Conteo físico
+            monedas1, monedas2, monedas5, monedas10, monedas20,
+            billetes20, billetes50, billetes100, billetes200, billetes500, billetes1000,
+            conteoUSD, conteoCAD, conteoEUR,
+            // Tarjetas
+            bbvaNacional, bbvaInternacional, clipNacional, clipInternacional, transferencia,
+            // Observaciones
+            observaciones,
+            // Datos calculados (del frontend)
+            ventasBrutas, descuentos, cancelaciones, ventasNetas,
+            efectivoEsperado, usdEsperado, cadEsperado, eurEsperado,
+            numVentas, ticketPromedio,
+            entradas, salidas, gastos,
+            // Validación admin
+            usuarioAutoriza, pinAutoriza
+        } = req.body;
+
+        // Validar autorización si hay diferencias (opcional)
+        if (usuarioAutoriza && pinAutoriza) {
+            if (!CACHE.usuarios.data) await cargarUsuarios();
+            const admin = CACHE.usuarios.data.find(u => 
+                String(u['ID Empleado']).trim() === String(usuarioAutoriza).trim() &&
+                String(u['Pin de Acceso a Sistema']).trim() === String(pinAutoriza).trim()
+            );
+            
+            if (!admin) {
+                return res.status(401).json({ success: false, error: 'PIN de autorización incorrecto' });
+            }
+            
+            const rol = (admin.Puesto || '').toLowerCase();
+            if (!rol.includes('admin') && !rol.includes('gerente') && !rol.includes('super')) {
+                return res.status(403).json({ success: false, error: 'Usuario no tiene permisos para autorizar' });
+            }
+        }
+
+        // Calcular total MXN contado
+        const totalMXN = 
+            (parseFloat(monedas1) || 0) * 1 +
+            (parseFloat(monedas2) || 0) * 2 +
+            (parseFloat(monedas5) || 0) * 5 +
+            (parseFloat(monedas10) || 0) * 10 +
+            (parseFloat(monedas20) || 0) * 20 +
+            (parseFloat(billetes20) || 0) * 20 +
+            (parseFloat(billetes50) || 0) * 50 +
+            (parseFloat(billetes100) || 0) * 100 +
+            (parseFloat(billetes200) || 0) * 200 +
+            (parseFloat(billetes500) || 0) * 500 +
+            (parseFloat(billetes1000) || 0) * 1000;
+
+        // Calcular diferencias
+        const difEfectivo = totalMXN - (parseFloat(efectivoEsperado) || 0);
+        const difUSD = (parseFloat(conteoUSD) || 0) - (parseFloat(usdEsperado) || 0);
+        const difCAD = (parseFloat(conteoCAD) || 0) - (parseFloat(cadEsperado) || 0);
+        const difEUR = (parseFloat(conteoEUR) || 0) - (parseFloat(eurEsperado) || 0);
+
+        // Actualizar turno en AppSheet
+        const updateData = {
+            ID: turnoId,
+            'Hora de Cierre': formatearHoraAppSheet(),
+            Estado: 'Cerrado',
+            // Conteo monedas
+            'Monedas de $1 MXN': parseFloat(monedas1) || 0,
+            'Monedas de $2 MXN': parseFloat(monedas2) || 0,
+            'Monedas de $5 MXN': parseFloat(monedas5) || 0,
+            'Monedas de $10 MXN': parseFloat(monedas10) || 0,
+            'Monedas de $20 MXN': parseFloat(monedas20) || 0,
+            // Conteo billetes
+            'Billetes de $20 MXN': parseFloat(billetes20) || 0,
+            'Billetes de $50 MXN': parseFloat(billetes50) || 0,
+            'Billetes de $100 MXN': parseFloat(billetes100) || 0,
+            'Billetes de $200 MXN': parseFloat(billetes200) || 0,
+            'Billetes de $500 MXN': parseFloat(billetes500) || 0,
+            'Billetes de $1000 MXN': parseFloat(billetes1000) || 0,
+            'Total MXN (Calculado)': totalMXN,
+            // Otras monedas
+            '💵 USD': parseFloat(conteoUSD) || 0,
+            '🍁 CAD': parseFloat(conteoCAD) || 0,
+            '🇪🇺 EUR': parseFloat(conteoEUR) || 0,
+            // Tarjetas
+            'BBVA Nacional': parseFloat(bbvaNacional) || 0,
+            'BBVA Internacional': parseFloat(bbvaInternacional) || 0,
+            'Clip Nacional': parseFloat(clipNacional) || 0,
+            'Clip Internacional': parseFloat(clipInternacional) || 0,
+            'Transferencia electrónica de fondos': parseFloat(transferencia) || 0,
+            // Ventas
+            'Ventas Brutas': parseFloat(ventasBrutas) || 0,
+            'Descuentos Aplicados': parseFloat(descuentos) || 0,
+            'Cancelaciones': parseFloat(cancelaciones) || 0,
+            'Ventas Netas': parseFloat(ventasNetas) || 0,
+            // Movimientos
+            'Entradas': parseFloat(entradas) || 0,
+            'Salidas': parseFloat(salidas) || 0,
+            'Gastos': parseFloat(gastos) || 0,
+            // Esperado
+            'Efectivo esperado en caja': parseFloat(efectivoEsperado) || 0,
+            'USD Esperado': parseFloat(usdEsperado) || 0,
+            'CAD Esperado': parseFloat(cadEsperado) || 0,
+            'EUR Esperado': parseFloat(eurEsperado) || 0,
+            // Diferencias
+            'Diferencia Efectivo': difEfectivo,
+            'Diferencia USD': difUSD,
+            'Diferencia CAD': difCAD,
+            'Diferencia EUR': difEUR,
+            // Stats
+            'Número de ventas': parseInt(numVentas) || 0,
+            'Ticket Promedio': parseFloat(ticketPromedio) || 0,
+            // Observaciones
+            'Observaciones': observaciones || ''
+        };
+
+        await appsheetRequest('AbrirTurno', 'Edit', [updateData]);
+
+        res.json({
+            success: true,
+            mensaje: 'Corte guardado y turno cerrado',
+            resumen: {
+                totalContado: totalMXN,
+                esperado: parseFloat(efectivoEsperado) || 0,
+                diferencia: difEfectivo,
+                usdContado: parseFloat(conteoUSD) || 0,
+                usdEsperado: parseFloat(usdEsperado) || 0,
+                difUSD,
+                cadContado: parseFloat(conteoCAD) || 0,
+                cadEsperado: parseFloat(cadEsperado) || 0,
+                difCAD,
+                eurContado: parseFloat(conteoEUR) || 0,
+                eurEsperado: parseFloat(eurEsperado) || 0,
+                difEUR
+            }
+        });
+
+    } catch (error) {
+        console.error('Error cerrar corte:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// RECALCULAR CORTE (requiere admin)
+app.post('/api/turnos/:turnoId/recalcular', async (req, res) => {
+    try {
+        const { turnoId } = req.params;
+        const { usuarioId, pin } = req.body;
+
+        // Validar admin
+        if (!CACHE.usuarios.data) await cargarUsuarios();
+        const admin = CACHE.usuarios.data.find(u => 
+            String(u['ID Empleado']).trim() === String(usuarioId).trim() &&
+            String(u['Pin de Acceso a Sistema']).trim() === String(pin).trim()
+        );
+        
+        if (!admin) {
+            return res.status(401).json({ success: false, error: 'Credenciales incorrectas' });
+        }
+        
+        const rol = (admin.Puesto || '').toLowerCase();
+        if (!rol.includes('admin') && !rol.includes('gerente') && !rol.includes('super')) {
+            return res.status(403).json({ success: false, error: 'Solo Admin, Gerente o Super Admin pueden recalcular' });
+        }
+
+        // Reabrir turno para recalcular
+        await appsheetRequest('AbrirTurno', 'Edit', [{
+            ID: turnoId,
+            Estado: 'Abierto',
+            'Hora de Cierre': ''
+        }]);
+
+        res.json({ 
+            success: true, 
+            mensaje: 'Turno reabierto para recalcular',
+            autorizadoPor: admin.Nombre
+        });
+
+    } catch (error) {
+        console.error('Error recalcular:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
