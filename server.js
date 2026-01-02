@@ -362,8 +362,6 @@ app.post('/api/turnos/abrir', async (req, res) => {
 
         const ahora = new Date();
         const turnoData = {
-            Fecha: formatearFechaAppSheet(ahora),
-            'Hora Apertura': formatearHoraAppSheet(ahora),
             Usuario: usuario,
             Sucursal: sucursal,
             Estado: 'Abierto',
